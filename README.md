@@ -1,0 +1,86 @@
+# Isaac Sim warehouse autonomy
+
+A small warehouse "micro-world" built on **Isaac Sim / Isaac Sim 5.1** with pure Python + USD:
+two conveyor belts feed crates to a UR5 and a Franka, Nova Carters carry them to docks, forklifts
+put them on pallets, and three animated people walk their own looping routes between the racks
+while everything else keeps out of their way.
+
+Everything is driven by one simulation loop (`logic.py` -> `Sim.step()`), physics is real
+(articulations, rigid bodies, contacts), and every asset is measured off-screen before it is
+placed, so a centimetre-authored asset can never end up 100x too big or floating above the floor.
+
+## Run it
+
+```bash
+# interactive GUI
+./python.sh ~/warehouse/step3_autonomy.py
+
+# headless, 600 physics steps, no images
+./python.sh ~/warehouse/step3_autonomy.py --headless --steps 600
+```
+
+Useful flags:
+
+| flag | meaning |
+| --- | --- |
+| `--steps N` | run N physics steps (0 = until the window is closed) |
+| `--shots N` | save a viewport frame every N steps into `shots/` |
+| `--track N` | cinematic follow-cam on person N (side tracking shot) |
+| `--record DIR` | write a numbered PNG frame sequence of that shot |
+| `--every N` | one recorded frame every N physics steps (2 = 30 fps) |
+
+## People
+
+The characters are NVIDIA SimReady `RL_BoneRoot` assets. Each one gets the Isaac in-place walk
+clip retargeted onto its own skeleton at build time (`omni.anim.retarget.core`), and the
+retargeted clip is measured, not assumed:
+
+* **stride and cadence** - `_stride_probe()` walks the baked joint chain and measures how far each
+  foot travels horizontally over the cycle. The clips are 1.333 s long with a 1.67-1.83 m stride,
+  i.e. a natural 1.25-1.37 m/s. Each person is driven at `stride / cycle`, so the feet stay planted
+  instead of sliding.
+* **heading** - the rigs walk along their local **-Y**, the planner heading is +X, so the visuals
+  are rotated by `PERSON_YAW_OFFSET_DEG = 90`. Without it they crab-walked sideways.
+* **independent animation sources** - all characters share one omni-timeline playhead, so each one
+  gets its own phase-shifted copy of the clip (`_phase_clip`). Otherwise they step in lockstep.
+* **blocked legs** - while a person is blocked by a carter or another walker it switches its
+  animation source to an averaged *standing* pose (`_stand_clip`), so it no longer walks in place.
+
+`sim.time` pins the playhead to simulated time every frame (`people.step`), which keeps the gait
+locked to ground speed even when rendering and physics run at different rates.
+
+## Videos
+
+`videos/person{0,1,2}.mp4` - 10 s side-tracking cinematic of each character walking its route,
+captured with `--track`:
+
+```bash
+for i in 0 1 2; do
+  ./python.sh ~/warehouse/step3_autonomy.py --headless --steps 600 --track $i \
+      --record /tmp/frames_$i --every 2
+  ffmpeg -framerate 30 -pattern_type glob -i "/tmp/frames_$i/*.png" \
+      -c:v libx264 -pix_fmt yuv420p -crf 20 videos/person$i.mp4
+done
+```
+
+## Layout
+
+```
+config.py            every dimension, speed, asset path and tuning constant
+scene.py             room shell, lights, conveyors
+statics.py           racks, cartons, columns (measured and registered as obstacles)
+assets.py            asset measuring/placing helpers (units, footprint, floor)
+nav.py               occupancy grid + unicycle Mobile model
+people.py            characters, retargeting, stride measurement, walk animation
+logic.py             Sim: belts, arms, carters, forklifts, traffic arbitration
+hw_isaac.py          hardware abstraction for the two arms
+usd_kin.py           arm kinematics + collision filtering
+step3_autonomy.py    builds the scene and runs the loop (CLI above)
+check_*.py, test_*.py, debug_retarget.py, inspect_*.py   asset/retarget probes used during bring-up
+```
+
+## Known limitations
+
+* The omni timeline is shared, so a person switches to a static standing pose when blocked rather
+  than blending into it; the pose change is a hard cut, not a cross-fade.
+* `MAX_RACKS` is deliberately small: the scene is tuned for a 6 GB laptop GPU (RTX 4050).
