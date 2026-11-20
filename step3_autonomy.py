@@ -26,7 +26,7 @@ from isaacsim import SimulationApp
 app = SimulationApp({"headless": args.headless, "width": C.RENDER_W, "height": C.RENDER_H, "renderer": C.RENDERER})
 
 import numpy as np
-from pxr import UsdGeom
+from pxr import Gf, UsdGeom
 import omni.usd
 from isaacsim.core.api import World
 from isaacsim.storage.native import get_assets_root_path
@@ -151,16 +151,42 @@ from usd_kin import filter_arm_collisions
 removed = filter_arm_collisions(stage, [p for _, p in arm_specs.values()])
 print(f"[step3] arms cannot physically hit crates (collision group); {removed} arm colliders removed")
 
+def _overview_cam():
+    """High corner view down the room diagonal with a wide lens, so one frame holds the whole
+    floor. The eye stays inside the shell (ceiling at z=5.1); a ~99 deg horizontal FOV comes
+    from a 9 mm focal length instead of backing the camera through the wall."""
+    # the built-in /OmniverseKit_Persp camera recomputes its lens from the viewport controller,
+    # so a focal length written there is ignored; author a real USD camera and render through it.
+    from isaacsim.core.utils.viewports import set_camera_view
+    from omni.kit.viewport.utility import get_active_viewport
+    path = "/World/OverviewCam"
+    try:
+        cam = UsdGeom.Camera.Get(omni.usd.get_context().get_stage(), path) or \
+            UsdGeom.Camera.Define(omni.usd.get_context().get_stage(), path)
+        cam.GetFocalLengthAttr().Set(8.5)
+        cam.GetHorizontalApertureAttr().Set(20.955)
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
+        set_camera_view(eye=np.array([-12.4, -7.4, 4.9]),
+                        target=np.array([12.4, 7.4, 0.0]), camera_prim_path=path)
+        get_active_viewport().camera_path = path
+        print(f"[step3] overview camera {path} focal={cam.GetFocalLengthAttr().Get():.2f}", flush=True)
+    except Exception as e:
+        print(f"[step3] wide-lens camera setup skipped: {e}", flush=True)
+        set_camera_view(eye=np.array([-12.4, -7.4, 4.85]), target=np.array([0.0, 0.0, 0.6]))
+
+
 # camera stays *inside* the warehouse (the shell has a ceiling at z=5.1, so a higher eye
 # only sees the roof and every capture comes out black)
-if not args.headless or args.shots:
-    from isaacsim.core.utils.viewports import set_camera_view
-    set_camera_view(eye=np.array([-4.5, -7.0, 4.4]), target=np.array([1.0, 0.5, 0.4]))
+if not args.headless or args.shots or args.record:
+    _overview_cam()
 
 world.reset()
 # reset() stops the omni timeline; restart it so the bound walk clips keep advancing while
 # world.step() drives the physics (otherwise the people slide along in their rest pose)
 world.play()
+# keep the overview camera after reset so a headless --record run still frames the whole room
+if args.record:
+    _overview_cam()
 for a in arms.values():
     a.init_sim()
 for a in arms.values():

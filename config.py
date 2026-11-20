@@ -127,6 +127,7 @@ WALK_CLIPS = [              # in-place walk loops (81 joints, t 0..80 @30 tps) -
 ]
 PEOPLE_N = 3                # walking people
 PEOPLE_SPEED = 1.30         # m/s; the clips' measured natural pace is 1.25-1.37 m/s (1.7-1.8 m stride / 1.333 s)
+PEOPLE_WALK_SPEED_SCALE = 0.70   # slow the walk a bit (animation + ground speed scaled together so feet stay planted)
 PEOPLE_WMAX = 2.2           # rad/s turn-in-place limit
 PEOPLE_GOALS = 5            # waypoints per looping route
 PEOPLE_R = 0.45             # planning disk radius of a person

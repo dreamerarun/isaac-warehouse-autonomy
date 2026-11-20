@@ -578,7 +578,7 @@ def build(stage, root, keep_out=(), seed=0):
                         try:
                             # walk exactly as fast as this clip's own stride, so the feet never
                             # slide on the floor (each rig bakes a slightly different stride)
-                            walk_speed = _stride_probe(stage, skel, baked) / _CLIP_S
+                            walk_speed = _stride_probe(stage, skel, baked) / _CLIP_S * C.PEOPLE_WALK_SPEED_SCALE
                         except Exception as e:
                             print(f"[stride] probe failed: {e}", flush=True)
                         # every character gets its own animation sources: a phase-shifted walk
@@ -714,7 +714,7 @@ def step(people, dt, t, obstacles=None):
             # pin the playhead to simulated time: the app timeline advances at wall-clock
             # rate and would otherwise cycle the legs faster/slower than the body moves.
             # set_current_time is applied on the next app update, i.e. the next world.step().
-            _TL.set_current_time(float(t) % _CLIP_S)
+            _TL.set_current_time((float(t) * C.PEOPLE_WALK_SPEED_SCALE) % _CLIP_S)
             if __import__("os").environ.get("ANIMDBG") and int(t * 60) % 30 == 0:
                 print(f"[anim] t={t:.2f} tl={_TL.get_current_time():.3f} "
                       f"playing={_TL.is_playing()}", flush=True)
