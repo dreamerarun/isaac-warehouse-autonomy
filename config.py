@@ -56,7 +56,7 @@ CEIL_LIGHT_COLS, CEIL_LIGHT_ROWS = 4, 3     # fixture grid across the ceiling (c
 CEIL_LIGHT_SIZE = (2.6, 1.3)      # light emitting area
 CEIL_PANEL_SIZE = (1.7, 0.85)     # visible diffuser; smaller than the light so a panel close
                                   # to the camera does not fill half the frame when seen edge-on
-CEIL_LIGHT_INTENSITY = 11000.0
+CEIL_LIGHT_INTENSITY = 8000.0
 DOME_INTENSITY = 450.0                      # soft ambient fill so the far corners are not black
 
 # ---- verified asset paths (from your assets_found.txt, Isaac Sim 5.1) ----
@@ -134,6 +134,13 @@ CLUTTER_SPOTS = [
     ("SW", -10.40, -7.20, 0.0, "crates", 0.50),
     ("E", +12.20, +0.80, 0.0, "crates", 0.60),
     ("E2", +12.20, -1.45, 0.0, "boxes", 0.60),
+    # the long bare stretch of the north wall west of the rack row, then the same on the south wall
+    ("N1", -8.10, +7.30, 0.0, "pallet", 0.60),
+    ("N2", -5.90, +7.30, 0.0, "boxes", 0.55),
+    ("N3", -11.90, +7.30, 0.0, "crates", 0.50),
+    ("S1", -8.10, -7.30, 0.0, "boxes", 0.55),
+    ("S2", -5.90, -7.30, 0.0, "crates", 0.50),
+    ("S3", -11.90, -7.30, 0.0, "pallet", 0.60),
 ]
 
 # ---- dynamic people + moving props (NVIDIA SimReady, wired in by step3_autonomy) ---------------

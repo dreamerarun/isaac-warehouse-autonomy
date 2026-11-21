@@ -163,13 +163,13 @@ def _overview_cam():
     try:
         cam = UsdGeom.Camera.Get(omni.usd.get_context().get_stage(), path) or \
             UsdGeom.Camera.Define(omni.usd.get_context().get_stage(), path)
-        cam.GetFocalLengthAttr().Set(8.5)
+        cam.GetFocalLengthAttr().Set(9.0)
         cam.GetHorizontalApertureAttr().Set(20.955)
         cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
         # aimed well below the far wall: the eye sits 0.2 m under the ceiling, so a shallow
         # pitch would fill the top third of the frame with the unlit ceiling underside
-        set_camera_view(eye=np.array([-11.0, -5.9, 4.85]),
-                        target=np.array([12.6, 6.2, -6.6]), camera_prim_path=path)
+        set_camera_view(eye=np.array([-10.6, -6.0, 4.70]),
+                        target=np.array([13.4, 5.8, -7.4]), camera_prim_path=path)
         get_active_viewport().camera_path = path
         print(f"[step3] overview camera {path} focal={cam.GetFocalLengthAttr().Get():.2f}", flush=True)
     except Exception as e:

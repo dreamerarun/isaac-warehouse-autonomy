@@ -276,8 +276,8 @@ def build(stage, root, keep_out, report=print, seed=3):
                 z += float(b[1][2])
             return z
 
-        top = max(_column("a", x - 0.36, y, rnd.choice((2, 3))),
-                  _column("b", x + 0.36, y + 0.26, rnd.choice((1, 2))))
+        top = max(_column("a", x - 0.36, y, rnd.choice((3, 4))),
+                  _column("b", x + 0.36, y + 0.26, rnd.choice((2, 3))))
         if any_ok:
             r = (x - half, x + half, y - half, y + half)
             rects.append(r)
