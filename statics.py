@@ -15,6 +15,42 @@ def _rect_of(stage, path):
     return (float(mn[0]), float(mx[0]), float(mn[1]), float(mx[1]))
 
 
+def _prop(stage, root, rel, path, x, y, z, yaw, report=print):
+    """Place one decorative prop under its own Xform holder.
+
+    The PackingTable props carry their own float3 xform ops on the referenced root, so a
+    transform cannot be authored there; the holder keeps our translate/rotate/scale separate.
+    Returns (holder, size_xyz) or None if the asset is missing.
+    """
+    from pxr import UsdGeom, Gf
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    url = f"{root}/{rel}"
+    try:
+        m = A.measure(url, (0.15, 1.2))
+        size = m["max"] - m["min"]
+        if not np.all(np.isfinite(size)) or size.max() <= 0:
+            raise RuntimeError("empty bounds")
+    except Exception as e:
+        report(f"[statics] could not measure {rel.split('/')[-1]}: {e}")
+        return None
+    holder = UsdGeom.Xform.Define(stage, path).GetPrim()
+    body = add_reference_to_stage(usd_path=url, prim_path=path + "/asset")
+    xf = UsdGeom.Xformable(holder)
+    xf.ClearXformOpOrder()
+    t = xf.AddTranslateOp()
+    xf.AddRotateZOp().Set(float(yaw))
+    s = float(m["scale"])
+    xf.AddScaleOp().Set(Gf.Vec3d(s, s, s))
+    t.Set(Gf.Vec3d(x, y, z))
+    try:                                 # snap the real footprint centre onto (x, y), bottom on z
+        mn, mx = A.world_bbox(holder, render=True)
+        t.Set(Gf.Vec3d(x + x - 0.5 * (mn[0] + mx[0]), y + y - 0.5 * (mn[1] + mx[1]), z + z - mn[2]))
+    except Exception as e:
+        report(f"[statics] could not ground {path}: {e}")
+    _make_static(body)
+    return holder, np.array(size)          # metres, already scale-corrected by measure()
+
+
 def _make_static(prim):
     """keep colliders, drop dynamics, so props are solid but never move."""
     from pxr import Usd, UsdPhysics
@@ -206,6 +242,50 @@ def build(stage, root, keep_out, report=print, seed=3):
                 z += float(b[1][2])                # next layer sits on this one's measured height
         r = _rect_of(stage, pp[0])
         rects.append((min(r[0], x - 0.6), max(r[1], x + 0.6), min(r[2], y - 0.6), max(r[3], y + 0.6)))
+
+    # ---- corner / side clutter: pallet stacks, crates and cartons against the walls -----------------------
+    # Every spot is rejected if its footprint touches a keep-out zone (belts, docks, forklift strips,
+    # carter parks), so the operation lanes stay exactly as they were.
+    def _stack(tag, x, y, yaw, kind, half):
+        foot = (x - half, x + half, y - half, y + half)
+        if any(_overlap(foot, k) for k in keep_out + rects):
+            report(f"[statics] clutter {tag} at ({x:.1f}, {y:.1f}) skipped (lane)")
+            return
+        pool = {"pallet": S["cartons"] + S["crates"],
+                "crates": S["crate_plastic"] + S["pack_crate"],
+                "boxes": S["carton_white"]}[kind]
+        z0, any_ok = 0.0, False
+        if kind == "pallet":
+            pp = _real(stage, root, S["pallet"], f"/World/Statics/Clutter{tag}_pallet", (x, y, 0.0), yaw, (0.8, 1.6), report)
+            if not pp:
+                return
+            z0, any_ok = float(pp[1][2]), True
+
+        def _column(nm, cx, cy, n):
+            """One vertical stack; each item sits on the measured top of the one below."""
+            nonlocal any_ok
+            z = z0
+            for k in range(n):
+                rel = rnd.choice(pool)
+                b = _prop(stage, root, rel, f"/World/Statics/Clutter{tag}_{nm}{k}",
+                          cx + rnd.uniform(-0.03, 0.03), cy + rnd.uniform(-0.03, 0.03), z,
+                          rnd.choice((0.0, 90.0)), lambda *_: None)
+                if not b:
+                    break
+                any_ok = True
+                z += float(b[1][2])
+            return z
+
+        top = max(_column("a", x - 0.36, y, rnd.choice((2, 3))),
+                  _column("b", x + 0.36, y + 0.26, rnd.choice((1, 2))))
+        if any_ok:
+            r = (x - half, x + half, y - half, y + half)
+            rects.append(r)
+            report(f"[statics] clutter {tag}: {kind} stack at ({x:.1f}, {y:.1f}), "
+                   f"top {top:.2f} m, footprint {(r[1] - r[0]):.1f} x {(r[3] - r[2]):.1f} m")
+
+    for tag, x, y, yaw, kind, half in C.CLUTTER_SPOTS:
+        _stack(tag, x, y, yaw, kind, half)
 
     # ---- columns (primitive cylinders with colliders) ---------------------------------------------------
     from pxr import UsdGeom, UsdPhysics, Gf

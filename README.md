@@ -63,6 +63,26 @@ for i in 0 1 2; do
 done
 ```
 
+`videos/warehouse_overview.mp4` - 150 s real-time overview of one full operation cycle from a
+fixed wide-angle corner camera (the whole floor in one frame; both forklifts complete a delivery
+in the last ten seconds):
+
+```bash
+./python.sh ~/warehouse/step3_autonomy.py --headless --steps 9000 --record /tmp/ov --every 3
+ffmpeg -framerate 20 -pattern_type glob -i "/tmp/ov/*.png" \
+    -c:v libx264 -pix_fmt yuv420p -crf 18 videos/warehouse_overview.mp4
+```
+
+## Dressing and lighting
+
+`scene.py` lights the room with a 4x3 grid of ceiling fixtures (each a `RectLight` plus a visible
+emissive diffuser panel) and a low-intensity dome for ambient fill, so no corner of the floor is
+black. `statics.py` stacks pallets, plastic crates and cartons in the four corners and along the
+east wall. Every proposed spot is checked against the keep-out rectangles (belts, docks, forklift
+strips, carter parking) before anything is placed and is skipped if it would intrude on a lane;
+every stack that is placed also registers its footprint, so the navigation grid routes people and
+robots around it.
+
 ## Layout
 
 ```

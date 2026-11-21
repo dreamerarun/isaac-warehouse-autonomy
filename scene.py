@@ -63,8 +63,14 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
     box("/World/Warehouse/WallS", (C.ROOM_X + C.WALL_T * 2, C.WALL_T, C.WALL_H), (0, -hy - C.WALL_T / 2, wz), "wall")
     box("/World/Warehouse/WallE", (C.WALL_T, C.ROOM_Y, C.WALL_H), (hx + C.WALL_T / 2, 0, wz), "wall")
     box("/World/Warehouse/WallW", (C.WALL_T, C.ROOM_Y, C.WALL_H), (-hx - C.WALL_T / 2, 0, wz), "wall")
-    box("/World/Warehouse/Ceiling", (C.ROOM_X + C.WALL_T * 2, C.ROOM_Y + C.WALL_T * 2, C.WALL_T),
-        (0, 0, C.WALL_H + C.WALL_T / 2), "wall")
+    # the ceiling underside only ever sees bounce light, so a plain grey slab renders black from
+    # a camera just under it; give it its own self-lit panel material
+    ceil_mat = material("/World/Looks/ceiling", (0.62, 0.62, 0.60), 0.9)
+    UsdShade.Shader.Get(stage, "/World/Looks/ceiling/Shader").CreateInput(
+        "emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.02, 0.02, 0.02))
+    ceiling = box("/World/Warehouse/Ceiling", (C.ROOM_X + C.WALL_T * 2, C.ROOM_Y + C.WALL_T * 2, C.WALL_T),
+                  (0, 0, C.WALL_H + C.WALL_T / 2), None)
+    UsdShade.MaterialBindingAPI(ceiling).Bind(ceil_mat)
 
     # ---------- static warehouse obstacles (racks, crates) -------------------
     # Legacy step-1 dressing: it hangs racks high on the west wall and scatters crates in
@@ -94,19 +100,34 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
 
     # (dynamic people and moving props are built by people.py and returned to the caller separately)
 
-    # ---------- lighting: a few rect lights under the ceiling (cheap) --------
-    n = C.NUM_CEILING_LIGHTS
-    cols = 3
-    xs = np.linspace(-hx * 0.6, hx * 0.6, cols)
-    ys = np.linspace(-hy * 0.5, hy * 0.5, n // cols)
+    # ---------- lighting: ceiling fixture grid + soft ambient fill -----------
+    # one visible glowing panel per light so the ceiling reads as a lit warehouse
+    fix_mat = UsdShade.Material.Define(stage, "/World/Looks/fixture")
+    fix_sh = UsdShade.Shader.Define(stage, "/World/Looks/fixture/Shader")
+    fix_sh.CreateIdAttr("UsdPreviewSurface")
+    fix_sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.9, 0.9, 0.87))
+    fix_sh.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(1.6, 1.6, 1.5))
+    fix_sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.45)
+    fix_mat.CreateSurfaceOutput().ConnectToSource(fix_sh.ConnectableAPI(), "surface")
+
+    lw, lh = C.CEIL_LIGHT_SIZE
+    xs = np.linspace(-hx * 0.72, hx * 0.72, C.CEIL_LIGHT_COLS)
+    ys = np.linspace(-hy * 0.62, hy * 0.62, C.CEIL_LIGHT_ROWS)
     i = 0
     for y in ys:
         for x in xs:
             L = UsdLux.RectLight.Define(stage, f"/World/Lights/Ceiling_{i}")
-            L.CreateWidthAttr(3.0); L.CreateHeightAttr(1.0)
-            L.CreateIntensityAttr(9000.0)
-            xf = UsdGeom.Xformable(L); xf.AddTranslateOp().Set(Gf.Vec3d(x, y, C.WALL_H - 0.1))
+            L.CreateWidthAttr(lw); L.CreateHeightAttr(lh)
+            L.CreateIntensityAttr(C.CEIL_LIGHT_INTENSITY)
+            UsdGeom.Xformable(L).AddTranslateOp().Set(Gf.Vec3d(x, y, C.WALL_H - 0.16))
+            # fixture housing under the ceiling slab, emissive so it glows in the render
+            pw, ph = C.CEIL_PANEL_SIZE
+            panel = box(f"/World/Lights/Fixture_{i}", (pw, ph, 0.06), (x, y, C.WALL_H - 0.04), None, collide=False)
+            UsdShade.MaterialBindingAPI(panel).Bind(fix_mat)
             i += 1  # RectLight faces -Z by default, i.e. down
+    dome = UsdLux.DomeLight.Define(stage, "/World/Lights/Dome")
+    dome.CreateIntensityAttr(C.DOME_INTENSITY)
+    dome.CreateColorAttr(Gf.Vec3f(0.88, 0.92, 1.0))
 
     # ---------- conveyors ----------------------------------------------------
     def build_conveyor(tag, cfg):

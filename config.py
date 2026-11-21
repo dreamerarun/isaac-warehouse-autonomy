@@ -52,6 +52,12 @@ CARTER_START = {
 RENDER_W, RENDER_H = 1280, 720
 RENDERER = "RaytracedLighting"   # not PathTracing
 NUM_CEILING_LIGHTS = 6
+CEIL_LIGHT_COLS, CEIL_LIGHT_ROWS = 4, 3     # fixture grid across the ceiling (corners get one)
+CEIL_LIGHT_SIZE = (2.6, 1.3)      # light emitting area
+CEIL_PANEL_SIZE = (1.7, 0.85)     # visible diffuser; smaller than the light so a panel close
+                                  # to the camera does not fill half the frame when seen edge-on
+CEIL_LIGHT_INTENSITY = 11000.0
+DOME_INTENSITY = 450.0                      # soft ambient fill so the far corners are not black
 
 # ---- verified asset paths (from your assets_found.txt, Isaac Sim 5.1) ----
 ASSETS = {
@@ -108,6 +114,27 @@ STATIC_ASSETS = {
     "pallet": "Isaac/Props/Pallet/pallet.usd",
 }
 MAX_RACKS = 10              # keeps the 6 GB GPU happy
+
+# ---- corner / side dressing (only ever at the walls, never in a lane) ----
+_PT = "Isaac/Props/PackingTable/props/"
+STATIC_ASSETS["crate_plastic"] = [_SW + n for n in (
+    "SM_CratePlastic_A_01.usd", "SM_CratePlastic_B_01.usd",
+    "SM_CratePlastic_C_01.usd", "SM_CratePlastic_E_01.usd")]
+STATIC_ASSETS["pack_crate"] = [_PT + n for n in (
+    "SM_Crate_A07_Yellow_01.usd", "SM_Crate_A08_Blue_01.usd")]
+STATIC_ASSETS["carton_white"] = [_PT + "sm_whitecorrugatedbox_b/sm_whitecorrugatedbox_b07_brown_01.usd",
+                                _PT + "sm_whitecorrugatedbox_b/sm_whitecorrugatedbox_b08_brown_01.usd",
+                                _PT + "sm_whitecorrugatedbox_b/sm_whitecorrugatedbox_b09_white_01.usd"]
+
+# (tag, x, y, yaw, kind, half-extent) - every spot is validated against the keep-out zones at build time
+CLUTTER_SPOTS = [
+    ("NE", +11.90, +6.50, 0.0, "boxes", 0.55),
+    ("SE", +11.90, -6.50, 0.0, "boxes", 0.55),
+    ("NW", -10.40, +7.20, 0.0, "crates", 0.50),
+    ("SW", -10.40, -7.20, 0.0, "crates", 0.50),
+    ("E", +12.20, +0.80, 0.0, "crates", 0.60),
+    ("E2", +12.20, -1.45, 0.0, "boxes", 0.60),
+]
 
 # ---- dynamic people + moving props (NVIDIA SimReady, wired in by step3_autonomy) ---------------
 _PEOPLE = "Isaac/People/Characters/"

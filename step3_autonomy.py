@@ -166,13 +166,39 @@ def _overview_cam():
         cam.GetFocalLengthAttr().Set(8.5)
         cam.GetHorizontalApertureAttr().Set(20.955)
         cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
-        set_camera_view(eye=np.array([-12.4, -7.4, 4.9]),
-                        target=np.array([12.4, 7.4, 0.0]), camera_prim_path=path)
+        # aimed well below the far wall: the eye sits 0.2 m under the ceiling, so a shallow
+        # pitch would fill the top third of the frame with the unlit ceiling underside
+        set_camera_view(eye=np.array([-11.0, -5.9, 4.85]),
+                        target=np.array([12.6, 6.2, -6.6]), camera_prim_path=path)
         get_active_viewport().camera_path = path
         print(f"[step3] overview camera {path} focal={cam.GetFocalLengthAttr().Get():.2f}", flush=True)
     except Exception as e:
         print(f"[step3] wide-lens camera setup skipped: {e}", flush=True)
         set_camera_view(eye=np.array([-12.4, -7.4, 4.85]), target=np.array([0.0, 0.0, 0.6]))
+
+
+_FOLLOW_CAM = "/World/FollowCam"
+_FOLLOW_LENS = [False]
+
+
+def _follow_cam(eye, target):
+    """Render the tracking shot through its own camera prim.
+
+    An `--record` run points the active viewport at /World/OverviewCam, so a bare
+    set_camera_view() (which drives the default Persp camera) would never reach the frame and
+    every "follow" video would just be the wide corner shot.
+    """
+    from isaacsim.core.utils.viewports import set_camera_view
+    from omni.kit.viewport.utility import get_active_viewport
+    if not _FOLLOW_LENS[0]:
+        cam = UsdGeom.Camera.Get(stage, _FOLLOW_CAM) or UsdGeom.Camera.Define(stage, _FOLLOW_CAM)
+        cam.GetFocalLengthAttr().Set(18.14756)      # the kit default lens the tracking shots used
+        cam.GetHorizontalApertureAttr().Set(20.955)
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
+        print(f"[step3] follow camera {_FOLLOW_CAM} focal={cam.GetFocalLengthAttr().Get():.2f}", flush=True)
+        _FOLLOW_LENS[0] = True
+    set_camera_view(eye=eye, target=target, camera_prim_path=_FOLLOW_CAM)
+    get_active_viewport().camera_path = _FOLLOW_CAM
 
 
 # camera stays *inside* the warehouse (the shell has a ceiling at z=5.1, so a higher eye
@@ -259,8 +285,9 @@ while app.is_running():
             if clear(cand):
                 want_eye = cand
                 break
-        if want_eye is None:
-            want_eye = np.array([m0.x - hx * 2.6, m0.y - hy * 2.6, 3.4])
+        if want_eye is None:                                  # nowhere clear: hold the last good eye
+            want_eye = np.array([m0.x - hx * 2.6, m0.y - hy * 2.6, 3.4]) \
+                if _cam["eye"] is None else np.array(_cam["eye"])
         if _cam["eye"] is None:
             _cam["eye"], _cam["tgt"] = want_eye, want_tgt
         else:                                                 # smooth, cinematic follow
@@ -270,7 +297,7 @@ while app.is_running():
         d = float(np.linalg.norm(gap))
         if d < 2.0:
             _cam["eye"][:2] = np.array([m0.x, m0.y]) + (gap / max(d, 1e-6)) * 2.0
-        set_camera_view(eye=_cam["eye"], target=_cam["tgt"])
+        _follow_cam(_cam["eye"], _cam["tgt"])
     if os.environ.get("CLOSEUP") and people:
         from isaacsim.core.utils.viewports import set_camera_view
         ci = int(os.environ.get("CLOSEUP_IDX", "0"))

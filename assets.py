@@ -72,9 +72,17 @@ def place(stage, root, assets, prim_path, key, pos, yaw_deg=0.0, inert=False, ex
 
     def apply(s):
         xf.ClearXformOpOrder()
-        xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*pos))
-        xf.AddRotateZOp(UsdGeom.XformOp.PrecisionDouble).Set(float(yaw_deg))
-        xf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(s, s, s))
+        try:
+            xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*pos))
+            xf.AddRotateZOp(UsdGeom.XformOp.PrecisionDouble).Set(float(yaw_deg))
+            xf.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(s, s, s))
+        except Exception:
+            # some props (PackingTable crates) ship their own float3 ops on the root prim, so a
+            # double-precision op of the same name is rejected; fall back to the default precision
+            xf.ClearXformOpOrder()
+            xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
+            xf.AddRotateZOp().Set(float(yaw_deg))
+            xf.AddScaleOp().Set(Gf.Vec3d(s, s, s))
 
     apply(scale)
     if expect:
