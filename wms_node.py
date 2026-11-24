@@ -67,8 +67,11 @@ class WMS(Node):
             for s in lay.get("forklift_strips", []):
                 y = (s["y0"] + s["y1"]) / 2
                 self.fork_line[s["name"]] = min(belts, key=lambda k: abs(belts[k] - y))
-            self.lines = sorted(belts) or self.lines
-            self.get_logger().info(f"layout: lines {self.lines}, forklift -> line {self.fork_line}")
+            lines = sorted(belts) or self.lines
+            if (lines, self.fork_line) != getattr(self, "_seen_layout", None):   # republished every 10 s
+                self._seen_layout = (lines, dict(self.fork_line))
+                self.get_logger().info(f"layout: lines {lines}, forklift -> line {self.fork_line}")
+            self.lines = lines
         except Exception as e:
             self.get_logger().warn(f"layout not understood: {e}")
 
