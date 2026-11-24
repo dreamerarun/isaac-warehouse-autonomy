@@ -28,8 +28,12 @@ def strip_physics(prim):
     from pxr import Usd, UsdPhysics
     for p in list(Usd.PrimRange(prim)):
         try:
-            if p.GetTypeName() in ("OmniGraph", "OmniGraphNode") or p.GetName() in ("ActionGraph", "ROS_Graph"):
-                p.SetActive(False)                       # drive/ROS graphs would look for rigid bodies we just removed
+            tn = p.GetTypeName()
+            if tn in ("OmniGraph", "OmniGraphNode") or p.GetName() in ("ActionGraph", "ROS_Graph") \
+                    or (tn.startswith("Isaac") and tn.endswith("Sensor")):
+                # drive/ROS graphs and physics sensors (the Nova Carter's IsaacImuSensor prims) would
+                # look for the rigid bodies we just removed and flood the log at every reset
+                p.SetActive(False)
         except Exception:
             pass
     for p in list(Usd.PrimRange(prim)):
@@ -139,7 +143,7 @@ def measure(url, expect=None):
                 continue
             g.append((p.GetPath().pathString, np.array(r.GetMin()) * s, np.array(r.GetMax()) * s))
     mn, mx = np.array(whole.GetMin()) * s, np.array(whole.GetMax()) * s
-    _MEASURE_CACHE[key] = dict(scale=s, gprims=g, min=mn, max=mx)
+    _MEASURE_CACHE[key] = dict(scale=s, gprims=g, min=mn, max=mx, stage=st)
     return _MEASURE_CACHE[key]
 
 
@@ -162,8 +166,49 @@ def forklift_geometry(m):
     cx = float((mn[0] + mx[0]) / 2)
     forward = 1.0 if cx > 0 else -1.0          # +1: forks extend toward local +x
     tip = float(mx[0]) if forward > 0 else float(-mn[0])
-    return dict(forward=forward, tip=tip, surf=float(mx[2]), thk=float(np.median([b[2] - a[2] for _, a, b in tines])),
+    surf, thk = float(mx[2]), float(np.median([b[2] - a[2] for _, a, b in tines]))
+    # A tine mesh is usually L-shaped (horizontal blade + vertical shank on the carriage), so its
+    # bounding-box top is the top of the shank, not the blade the load rests on. Read the mesh
+    # points and keep only the blade: everything ahead of the shank.
+    blade = _blade_from_points(m, [p for p, _, _ in tines], forward)
+    if blade is not None:
+        if abs(blade[0] - surf) > 0.02:
+            print(f"[assets] forklift: blade top {blade[0]:.3f} m, thickness {blade[1]:.3f} m "
+                  f"(bounding box said {surf:.3f} / {thk:.3f} m: the shank, not the blade)")
+        surf, thk = blade
+    return dict(forward=forward, tip=tip, surf=surf, thk=thk,
                 width=float(mx[1] - mn[1]), count=len(tines), length=float(mx[0] - mn[0]))
+
+
+def _blade_from_points(m, paths, forward):
+    """(top, thickness) of the horizontal fork blades from their mesh points, or None."""
+    from pxr import Usd, UsdGeom
+    st = m.get("stage")
+    if st is None:
+        return None
+    xc = UsdGeom.XformCache(0)
+    tops, bots = [], []
+    for path in paths:
+        p = st.GetPrimAtPath(path)
+        if not p or not p.IsA(UsdGeom.Mesh):
+            continue
+        pts = UsdGeom.Mesh(p).GetPointsAttr().Get()
+        if not pts:
+            continue
+        pts = np.asarray(pts, float)
+        M = np.asarray(xc.GetLocalToWorldTransform(p), float)
+        w = (np.c_[pts, np.ones(len(pts))] @ M)[:, :3] * m["scale"]
+        x = w[:, 0] * forward                              # distance along the fork direction
+        heel, toe = float(x.min()), float(x.max())
+        sel = w[x >= heel + 0.25 * (toe - heel)]           # skip the shank at the heel
+        if len(sel) < 4:
+            continue
+        tops.append(float(sel[:, 2].max()))
+        bots.append(float(sel[:, 2].min()))
+    if not tops:
+        return None
+    top = float(np.median(tops))
+    return top, max(top - float(np.median(bots)), 0.01)
 
 
 def carter_geometry(m):

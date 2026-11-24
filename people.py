@@ -485,6 +485,14 @@ def build(stage, root, keep_out=(), seed=0):
         g = Grid(-hx, hx, -hy, hy, 0.1)
         rects = wall_rects + [tuple(r) for r in keep_out] + [tuple(r) for r in C.STATIC_RECTS]
         g.build(rects, C.PEOPLE_R, C.PEOPLE_R)
+        # true distance from every cell centre to the nearest obstacle (no inflation): the step
+        # guard uses it to tell "moving deeper into an obstacle's margin" from "moving out of it"
+        clear = np.full(g.X.shape, 99.0)
+        for (a, b, c, d) in rects:
+            dx = np.maximum(np.maximum(a - g.X, g.X - b), 0.0)
+            dy = np.maximum(np.maximum(c - g.Y, g.Y - d), 0.0)
+            clear = np.minimum(clear, np.hypot(dx, dy))
+        g.clear = clear
         return g
 
     grid = new_grid()
@@ -535,9 +543,21 @@ def build(stage, root, keep_out=(), seed=0):
             from omni.anim.retarget.core import auto_setup
             auto_setup("Human", src_skel.GetPath())      # tags + facing for the source, once
 
+    # a spawn spot must connect to the main floor: a pocket between keep-outs (e.g. between the two
+    # forklift lanes) only reaches itself, and a walker spawned there stood still for good
+    hub = next((h for h in ((0.0, -4.5), (0.0, 4.5), (-2.0, -4.5), (2.0, 4.5), (-1.5, 0.0))
+                if grid.free_point(*h)), None)
+
+    def connected_spot(others):
+        for _ in range(40):
+            sp = _free_spot(grid, rng, min_d=2.0, others=others)
+            if sp is None or hub is None or reachable(sp, hub):
+                return sp
+        return None
+
     spawns = []
     for i in range(C.PEOPLE_N):
-        spot = _free_spot(grid, rng, min_d=2.0, others=spawns)
+        spot = connected_spot(spawns)
         if spot is None:
             print("[step3 people] no free spot left for another person", flush=True)
             break
@@ -702,6 +722,24 @@ def build(stage, root, keep_out=(), seed=0):
     return people
 
 
+def _plan_out(g, start, goal, disks):
+    """Plan a walker's route. A walker standing inside an obstacle's comfort margin (it may graze
+    one, see step()) has no free neighbour cell, so the planner would find nothing and the walker
+    would never move again: route it to the nearest free cell first - a step out of the margin,
+    which the step guard always allows - and on to the goal from there."""
+    path = g.plan(start, goal, disks, 0.9, 0.6)
+    if path is not None:
+        return path
+    c = g.cell(*start)
+    if g.soft[c]:
+        n = g._nearest_free(g.soft, c)
+        if n is not None:
+            exit_pt = g.world(*n)
+            rest = g.plan(exit_pt, goal, disks, 0.9, 0.6)
+            return [exit_pt] + (rest or [])
+    return None
+
+
 def step(people, dt, t, obstacles=None):
     """Advance every person/prop along its looping route and write its prim transform.
 
@@ -738,9 +776,30 @@ def step(people, dt, t, obstacles=None):
         disks = [(dx, dy, dr + p["r"]) for dx, dy, dr in others
                  if math.hypot(mob.x - dx, mob.y - dy) > dr + p["r"]]
         near = any(math.hypot(mob.x - dx, mob.y - dy) < C.PEOPLE_REPLAN_D for dx, dy, _ in others)
+        # watchdog: whatever froze it (a corner of rules nobody foresaw), a walker/prop that has
+        # not moved 30 cm in 15 s heads for the nearest clearly free cell with relaxed margin
+        # rules for 5 s (still never into an obstacle or a robot) and plans afresh from there
+        wd_xy = p.setdefault("wd_xy", (mob.x, mob.y))
+        if math.hypot(mob.x - wd_xy[0], mob.y - wd_xy[1]) > 0.3:
+            p["wd_xy"], p["wd_t"] = (mob.x, mob.y), t
+        elif t - p.setdefault("wd_t", t) > 15.0:
+            g0 = p["grid"]
+            n = g0._nearest_free(g0.soft, g0.cell(mob.x, mob.y), rmax=30)
+            exit_pt = g0.world(*n) if n is not None else None
+            p["goal_idx"] = (gi + 1) % len(goals)
+            goal = goals[p["goal_idx"]]
+            rest = g0.plan(exit_pt, goal, (), 0.9, 0.6) if exit_pt else None
+            p["path"] = ([exit_pt] if exit_pt else []) + (rest or [])
+            p["plan_t"], p["soft_t"] = t, 0.0
+            p["unstick_until"] = t + 5.0
+            p["unsticks"] = p.get("unsticks", 0) + 1
+            p["wd_xy"], p["wd_t"] = (mob.x, mob.y), t
+            print(f"[step3 people] {p['name']}: stuck 15 s at ({mob.x:.1f}, {mob.y:.1f}) -> unstick "
+                  f"via ({exit_pt[0]:.1f}, {exit_pt[1]:.1f})" if exit_pt else
+                  f"[step3 people] {p['name']}: stuck 15 s at ({mob.x:.1f}, {mob.y:.1f}) -> new goal", flush=True)
         due = t - p["plan_t"] >= (1.0 if p["path"] else 0.5)
-        if due and (not p["path"] or near):
-            path = p["grid"].plan((mob.x, mob.y), goal, disks, 0.9, 0.6)
+        if due and (not p["path"] or near) and t >= p.get("unstick_until", -1.0):
+            path = _plan_out(p["grid"], (mob.x, mob.y), goal, disks)
             p["plan_t"] = t
             if path:
                 p["path"] = path
@@ -769,14 +828,37 @@ def step(people, dt, t, obstacles=None):
         # carter waits while the walker goes around it instead of overlapping it visually
         blocked = False
         p["block_reason"] = ""
-        if not p["grid"].free_point(mob.x, mob.y):     # stepped too close to a rack/wall/cone
-            mob.x, mob.y, mob.v = old_xy[0], old_xy[1], 0.0
-            blocked = True
-            p["block_reason"] = "static"
+        g = p["grid"]
+        # Static obstacles (racks, walls, cones, keep-outs) by true clearance: a step that is not
+        # moving deeper into an obstacle's comfort margin is always fine (so a walker standing in
+        # a margin can always walk out of it). A step that enters the margin from clear floor is
+        # held while the walker finishes turning to its waypoint (it starts walking ~30 deg off),
+        # keeping its route; after 1.5 s it may graze the margin, never closer than 0.25 m.
+        # (Refusing every margin step and dropping the route froze walkers for good.)
+        d_old = float(g.clear[g.cell(*old_xy)])
+        d_new = float(g.clear[g.cell(mob.x, mob.y)])
+        R = C.PEOPLE_R
+        unstick = t < p.get("unstick_until", -1.0)
+        if d_new < R and d_new < d_old - 1e-4 and not (unstick and d_new >= 0.10):
+            if d_old >= R and p.get("soft_t", 0.0) < 1.5 and not unstick:
+                mob.x, mob.y, mob.v = old_xy[0], old_xy[1], 0.0
+                p["soft_t"] = p.get("soft_t", 0.0) + dt
+                reached = False
+            elif d_new < 0.25:
+                mob.x, mob.y, mob.v = old_xy[0], old_xy[1], 0.0
+                blocked = True
+                p["block_reason"] = "static"
+        else:
+            p["soft_t"] = 0.0
         for di, (dx, dy, dr) in enumerate(others):
             if blocked:
                 break
             rr = dr + p["r"] + 0.03          # keep a small clearance, never exactly touching
+            if di >= len(obs) and dr <= 0.5 and p["kind"] == "person":
+                # walker vs walker: the comfort radius is for planning; at step level only a real
+                # overlap is refused, so two people meeting head-on can pass shoulder to shoulder
+                # instead of both waiting for the other to move first
+                rr = 0.70
             if (math.hypot(mob.x - dx, mob.y - dy) < rr
                     and math.hypot(old_xy[0] - dx, old_xy[1] - dy) >= rr):
                 mob.x, mob.y, mob.v = old_xy[0], old_xy[1], 0.0

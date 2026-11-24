@@ -92,6 +92,7 @@ class ForkU:
         self.cargo = None
         self.carter_free = False
         self.delivered = 0
+        self.stack = []                              # crates on the current pallet
         self.belt = None
         self.CT = (C.CARTER_TRANSFER_X, fy)
         self.AP = (C.CARTER_TRANSFER_X, fy - self.sgn * 1.9)
@@ -122,6 +123,15 @@ class Sim:
         self.grid = self._build_grid()
         self.min_sep = 99.0
         self.min_person_sep = 99.0
+        # external control (ROS 2): order-driven release of crates, e-stop, live status per actor
+        self.order_mode = False                 # True: a belt only releases a crate against an order
+        self.orders = {t: 0 for t in self.belts}
+        self.estop = False                      # machines hold still; people keep walking
+        self.status = {}                        # actor name -> last thing it reported
+        self.person_yields = 0
+        self.shipped = 0
+        self.stalls = 0                         # watchdog escapes (should stay 0)
+        self.listeners = []                     # callables(t, msg) for every logged event
 
     # ------------------------------------------------------------------ setup
     def _build_grid(self):
@@ -157,7 +167,19 @@ class Sim:
 
     def log(self, msg):
         self.events.append((self.t, msg))
+        if len(self.events) > 2000:
+            del self.events[:1000]
+        head, sep, rest = msg.partition(": ")
+        if sep:
+            self.status[head] = rest                  # "C1", "F2", "arm A", "belt B", "dispatch"
+        if "making way for person" in msg or "making way for pushcart" in msg or "making way for dolly" in msg:
+            self.person_yields += 1
         print(f"[{self.t:7.1f}s] {msg}", flush=True)
+        for cb in self.listeners:
+            try:
+                cb(self.t, msg)
+            except Exception as e:                    # a monitoring hook must never stop the plant
+                print(f"[logic] listener failed: {e}", flush=True)
 
     def start(self):
         for b in self.belts.values():
@@ -171,6 +193,8 @@ class Sim:
             self.gens.append(self.fork_proc(f))
 
     def step(self):
+        if self.estop:
+            return                                    # every machine holds its pose; nothing advances
         self.t += DT
         for g in list(self.gens):
             try:
@@ -216,6 +240,12 @@ class Sim:
     # ------------------------------------------------------------------ belts
     def belt_proc(self, b):
         while True:
+            if self.order_mode and self.orders.get(b.tag, 0) <= 0:
+                self.log(f"belt {b.tag}: waiting for an order")
+                while self.order_mode and self.orders.get(b.tag, 0) <= 0:
+                    yield
+            if self.order_mode:
+                self.orders[b.tag] -= 1
             b.pkg = self.hw.spawn_pkg(b.tag)
             b.ready = False
             self.log(f"belt {b.tag}: new package on belt")
@@ -262,17 +292,21 @@ class Sim:
     def _apply(self, c):
         # People and moving props have absolute right of way: a carter never enters their disk,
         # even when a manoeuvre (turn, backoff, deadlock escape) was not people-aware.
+        # Inside the clearance ring only a step that *closes in* on the person is refused: backing
+        # away or turning is allowed. (Freezing every motion inside the ring locked a carter and a
+        # walker who had stopped at each other's edge for good: each waited for the other.)
         c._people_blocked = False
         for p in self.people:
             m = p["mob"]
             rr = C.CARTER_RADIUS + p.get("r", 0.45) + 0.10
-            if math.hypot(c.mob.x - m.x, c.mob.y - m.y) < rr:
-                if c.applied_xy is not None and math.hypot(c.applied_xy[0] - m.x,
-                                                           c.applied_xy[1] - m.y) >= rr:
+            d_new = math.hypot(c.mob.x - m.x, c.mob.y - m.y)
+            if d_new < rr and c.applied_xy is not None:
+                d_old = math.hypot(c.applied_xy[0] - m.x, c.applied_xy[1] - m.y)
+                if d_new < d_old - 1e-6:
                     c.mob.x, c.mob.y = c.applied_xy
-                c.mob.v = 0.0
-                c._people_blocked = True
-                break
+                    c.mob.v = 0.0
+                    c._people_blocked = True
+                    break
         self.hw.carter_set(c.name, c.mob.x, c.mob.y, c.mob.yaw)
         if c.cargo is not None:
             sx, sy = c.slot_world()
@@ -375,6 +409,7 @@ class Sim:
                 if sc > bs:
                     best, bs = p, sc
         if best is None:
+            yield from self._reverse_out(c)
             return
         self.log(f"{c.name}: deadlock escape")
         t = 0.0
@@ -387,15 +422,55 @@ class Sim:
             t += DT
             yield
 
+    def _reverse_out(self, c, dist=1.5, v=0.3):
+        """Boxed in (no clearly free spot around): back straight out along the carter's own axis,
+        in whichever direction gains distance from the nearest person/prop. Robots yield to people,
+        so the robot makes the room. Never closes in on a person, a carter or an obstacle."""
+        if not self.people:
+            return
+        def nearest_person(x, y):
+            return min(math.hypot(x - p["mob"].x, y - p["mob"].y) for p in self.people)
+        co, si = math.cos(c.mob.yaw), math.sin(c.mob.yaw)
+        sgn = -1.0 if nearest_person(c.mob.x - co, c.mob.y - si) >= nearest_person(c.mob.x + co, c.mob.y + si) else 1.0
+        self.log(f"{c.name}: boxed in -> {'reversing' if sgn < 0 else 'creeping forward'} to make room")
+        moved = 0.0
+        while moved < dist:
+            nx, ny = c.mob.x + sgn * co * v * DT, c.mob.y + sgn * si * v * DT
+            if not self.grid.free_point(nx, ny) and self.grid.free_point(c.mob.x, c.mob.y):
+                break                                           # would run into the static layout
+            if nearest_person(nx, ny) < nearest_person(c.mob.x, c.mob.y) and nearest_person(nx, ny) < C.CARTER_RADIUS + 0.9:
+                break                                           # would close in on somebody
+            if any(o is not c and math.hypot(nx - o.mob.x, ny - o.mob.y) < 2 * C.CARTER_RADIUS + 0.05
+                   for o in self.carters.values()):
+                break
+            c.mob.x, c.mob.y, c.mob.v = nx, ny, sgn * v
+            moved += v * DT
+            self._apply(c)
+            yield
+        c.mob.v = 0.0
+        yield from wait(1.0)                                    # give the walker a moment to pass
+
     def goto(self, c, goal, tol=0.15, abort=None, dock=False, must=False):
         exg = self.ex_r if dock else 0.3
         fails = 0
         path, idx, stuck, threatened, replans = None, 0, 0.0, 0.0, 0
         replan_t = -99.0
         extra = []
+        still_xy, still_t = (c.mob.x, c.mob.y), self.t
         while True:
             if abort and abort():
                 return False
+            # safety net: whatever the reason (a gridlock nobody detected), a carter that has not
+            # moved 5 cm in 25 s escapes to the freest spot around and plans again
+            if math.hypot(c.mob.x - still_xy[0], c.mob.y - still_xy[1]) > 0.05:
+                still_xy, still_t = (c.mob.x, c.mob.y), self.t
+            elif self.t - still_t > 25.0:
+                self.stalls += 1
+                self.log(f"{c.name}: stalled 25 s on the way to ({goal[0]:.1f}, {goal[1]:.1f}) -> escape")
+                yield from self._escape(c)
+                path, stuck = None, 0.0
+                still_xy, still_t = (c.mob.x, c.mob.y), self.t
+                continue
             if path is None:
                 disks = [(o.mob.x, o.mob.y, 0.75) for o in self.carters.values() if o is not c]
                 # dynamic people/props as disks (planned clear of both surfaces)
@@ -447,8 +522,8 @@ class Sim:
             if stuck > 3.0 and other is not None:
                 extra = [(other.mob.x, other.mob.y, 1.1)]
                 path, stuck, replans = None, 0.0, replans + 1
-                if c.roamer and replans > 2:
-                    return False
+                if c.roamer and replans > 2 and not must:   # a must-reach goal (dock, forklift) is never abandoned:
+                    return False                            # the caller would fall through to a blind straight drive
             yield
 
     def _hard_blocked(self, c):
@@ -771,6 +846,11 @@ class Sim:
         row, col = divmod(r, nxs)
         return (px + (col - (nxs - 1) / 2) * (D + 0.04), py + (row - (nys - 1) / 2) * (L + 0.04), top + layer * H)
 
+    def _capacity(self, f):
+        L, D, H = C.PKG_SIZE
+        _, _, _, sx, sy = self.hw.pallet_info(f.name)
+        return max(1, int(sx // (D + 0.04))) * max(1, int(sy // (L + 0.04))) * 3
+
     def _in_strip(self, f, c, m=0.5):
         return 5.7 - m < c.mob.x < 12.9 + m and f.fy - 1.0 - m < c.mob.y < f.fy + 1.0 + m
 
@@ -799,14 +879,22 @@ class Sim:
             while self._in_strip(f, c) or f.carter_at_ct is not None:
                 yield
             f.owner = "F"
-            slot = self._slot(f, f.delivered)
-            self.log(f"{f.name}: placing on pallet slot {f.delivered}")
+            cap = self._capacity(f)
+            if f.stack and len(f.stack) >= cap:       # pallet full: it ships, a fresh one takes its place
+                for old in f.stack:
+                    self.hw.remove_pkg(old)
+                self.shipped += 1
+                self.log(f"{f.name}: pallet full ({len(f.stack)} crates) -> shipped, fresh pallet in place")
+                f.stack = []
+            slot = self._slot(f, len(f.stack))
+            self.log(f"{f.name}: placing crate {len(f.stack) + 1}/{cap} on the pallet")
             yield from self._flift(f, self._touch(f, slot[2]) + 0.03)
             yield from self._fdrive(f, slot[0] + f.Ctip, slot[1])
             yield from self._flift(f, self._touch(f, slot[2]))     # crate rests on the pallet / crate below
             pkg.set_pose([slot[0], slot[1], slot[2] + H / 2], f.cargo_yaw)
             f.cargo = None
             f.delivered += 1
+            f.stack.append(pkg)
             yield from self._flift(f, self._touch(f, slot[2]) - 0.05)   # forks free of the crate before backing out
             yield from self._fdrive(f, f.fx, slot[1])
             yield from self._fdrive(f, f.fx, f.fy)

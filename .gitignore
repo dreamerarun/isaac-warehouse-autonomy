@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 *.log
 shots/
+logs/
+.run/
+videos_src/

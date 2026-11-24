@@ -5,6 +5,11 @@ two conveyor belts feed crates to a UR5 and a Franka, Nova Carters carry them to
 put them on pallets, and three animated people walk their own looping routes between the racks
 while everything else keeps out of their way.
 
+The cell stands on the open floor of NVIDIA's `full_warehouse` hall (racked aisles, 9 m ceiling,
+ceiling lamps, painted floor), marked out with yellow tape, and the whole plant is on **ROS 2**:
+every robot publishes odometry / tf / joint states, cameras stream as compressed images, a separate
+WMS node releases crates with orders, and a web dashboard (through rosbridge) shows and controls it.
+
 Everything is driven by one simulation loop (`logic.py` -> `Sim.step()`), physics is real
 (articulations, rigid bodies, contacts), and every asset is measured off-screen before it is
 placed, so a centimetre-authored asset can never end up 100x too big or floating above the floor.
@@ -19,6 +24,16 @@ placed, so a centimetre-authored asset can never end up 100x too big or floating
 ./python.sh ~/warehouse/step3_autonomy.py --headless --steps 600
 ```
 
+Or let `run.sh` find the interpreter (Isaac Sim 5.1 `python.sh`, or a pip-installed Isaac Sim 6.x
+venv such as the one on the DGX Spark / GB10, where it also preloads libgomp as aarch64 needs):
+
+```bash
+./run.sh --headless --steps 9000
+ISAAC_PY=~/isaacsim/python.sh ./run.sh          # pick a specific install
+```
+
+Built on Isaac Sim 5.1 (RTX 4050 laptop); also runs on Isaac Sim 6.2 (pip) on aarch64 (DGX Spark / GB10).
+
 Useful flags:
 
 | flag | meaning |
@@ -28,6 +43,64 @@ Useful flags:
 | `--track N` | cinematic follow-cam on person N (side tracking shot) |
 | `--record DIR` | write a numbered PNG frame sequence of that shot |
 | `--every N` | one recorded frame every N physics steps (2 = 30 fps) |
+| `--view ex,ey,ez,tx,ty,tz` | fixed camera eye + target instead of the overview (e.g. `8.6,0.6,1.7,8.6,4.2,0.6` = side view of the F1 hand-off) |
+| `--focal MM` | focal length of that fixed camera (default 9) |
+| `--ros` | ROS 2 interface (see below) |
+| `--orders` | belts release a crate only against an order on `/warehouse/orders` |
+| `--realtime` | pace the simulation to wall-clock time |
+| `--room` | the old plain 26 x 16 m shell instead of the warehouse building |
+
+## Whole stack: ROS 2 + WMS + web dashboard
+
+```bash
+./warehouse.sh start          # sim (headless, real time) + WMS + rosbridge :9090 + dashboard :8090
+./warehouse.sh status
+./warehouse.sh logs sim       # or wms | rosbridge | web
+./warehouse.sh stop
+./warehouse.sh start --gui    # Isaac Sim window on the local display as well
+```
+
+With `--gui` the window renders at 1280x720 with DLSS in performance mode, a frame every second
+physics step (30 fps), and the ROS overview camera reads its frames from the window instead of
+rendering the view twice: on a GB10 that keeps the cell at real time. `GUI_EVERY=3` (20 fps) buys
+more headroom on a slower GPU. Over SSH, point it at the desktop session, e.g.
+`DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority ./warehouse.sh start --gui`.
+
+Open `http://<host>:8090/` (the cell needs a few minutes to load its assets). Everything runs on
+ROS 2 Jazzy, `ROS_DOMAIN_ID=42` by default (`ROS_DOMAIN_ID=.. ./warehouse.sh start` to change), so
+any ROS 2 machine on the LAN with the same domain sees the topics (RViz: fixed frame `map`,
+add `/warehouse/markers`, `/map`, `/tf`).
+
+| interface | type | what |
+| --- | --- | --- |
+| `/clock` | rosgraph_msgs/Clock | simulation time |
+| `/tf`, `/tf_static` | tf2 | `map` -> `carter1..3/base_link`, `forklift1..2/base_link`, `ur5/base_link`, `franka/base_link`, people |
+| `/carter{1,2,3}/odom`, `/forklift{1,2}/odom` | nav_msgs/Odometry | 30 Hz |
+| `/forklift{1,2}/lift` | std_msgs/Float64 | fork height |
+| `/ur5/joint_states`, `/franka/joint_states` | sensor_msgs/JointState | 30 Hz |
+| `/warehouse/people`, `/warehouse/packages` | geometry_msgs/PoseArray | walkers + props, every crate |
+| `/warehouse/markers` | visualization_msgs/MarkerArray | for RViz / Foxglove |
+| `/map` | nav_msgs/OccupancyGrid (latched) | 0.1 m grid of the cell |
+| `/warehouse/layout` | std_msgs/String JSON (latched) | belts, docks, pallets, obstacles |
+| `/warehouse/state` | std_msgs/String JSON, 5 Hz | live state of every actor + KPIs |
+| `/warehouse/events` | std_msgs/String | event log |
+| `/warehouse/camera/{overview,follow}/compressed` | sensor_msgs/CompressedImage | 1280x720 jpeg, 4 Hz |
+| `/warehouse/camera/follow_target` | std_msgs/String (in) | `C1`, `F2`, `ur5`, `person1`, `overview` ... |
+| `/warehouse/orders` | std_msgs/String JSON (in) | `{"line": "A", "qty": 1}` releases crates |
+| `/warehouse/pause`, `/warehouse/resume` | std_srvs/Trigger | freeze / continue the physics |
+| `/warehouse/estop` | std_srvs/SetBool | machines and conveyors stop, people keep walking |
+| `/wms/status` | std_msgs/String JSON | orders queued -> released -> on carter -> delivered, throughput |
+| `/wms/new_order`, `/wms/config` | std_msgs/String JSON (in) | manual orders; `{"auto": true, "period_s": 45}` |
+
+`tools/ros_smoke.py` checks all of it against the running cell (rates, orders, e-stop, pause):
+
+```bash
+source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 python3 tools/ros_smoke.py
+```
+
+`CARTER_DIAG=10 ./run.sh --headless ...` prints every carter's and walker's position and state every
+10 s (how the people/carter gridlocks below were found).
+Full pallets (3 crates high) are shipped and replaced, so the cell can run indefinitely.
 
 ## People
 
@@ -51,27 +124,33 @@ locked to ground speed even when rendering and physics run at different rates.
 
 ## Videos
 
-`videos/person{0,1,2}.mp4` - 10 s side-tracking cinematic of each character walking its route,
-captured with `--track`:
+Click a picture to play the clip (all recorded on a DGX Spark / GB10 with Isaac Sim 6.2).
+
+| | |
+| --- | --- |
+| [![overview](videos/posters/warehouse_overview.jpg)](videos/warehouse_overview.mp4) | [![dashboard](videos/posters/web_dashboard.jpg)](videos/web_dashboard.mp4) |
+| **Overview** - one full cycle (150 s, real time): belts, both arms, carters, forklifts stacking, people walking | **Web dashboard** over ROS 2: live map, fleet, orders, cameras, e-stop and release |
+| [![arm](videos/posters/arm_pick_place.jpg)](videos/arm_pick_place.mp4) | [![forklift](videos/posters/forklift_handoff.jpg)](videos/forklift_handoff.mp4) |
+| **UR5 pick and place** - suction pick from the belt onto a Nova Carter | **Forklift hand-off** - forks under the crate on the carter, then onto the pallet |
+| [![person](videos/posters/person_walk.jpg)](videos/person_walk.mp4) | [![gui](videos/posters/isaac_sim_gui.jpg)](videos/isaac_sim_gui.mp4) |
+| **Walker** - retargeted walk clip, feet planted, tracking shot | **Isaac Sim GUI** - the stack started with `./warehouse.sh start --gui` |
+
+How they were made (seed 0, so the events land at the same times):
 
 ```bash
-for i in 0 1 2; do
-  ./python.sh ~/warehouse/step3_autonomy.py --headless --steps 600 --track $i \
-      --record /tmp/frames_$i --every 2
-  ffmpeg -framerate 30 -pattern_type glob -i "/tmp/frames_$i/*.png" \
-      -c:v libx264 -pix_fmt yuv420p -crf 20 videos/person$i.mp4
-done
+R="./run.sh --headless"
+$R --steps 9000 --record /tmp/ov --every 3                                   # overview, 20 fps
+$R --steps 3360 --record /tmp/arm --record-from 30 --every 2 \
+   --view=-4.0,1.6,2.3,-6.4,4.3,0.9 --focal 16                               # arm, 30 fps
+$R --steps 8800 --record /tmp/fork --record-from 110 --every 2 \
+   --view=8.6,0.6,1.7,8.6,4.2,0.6 --focal 11                                 # forklift
+$R --steps 2700 --track 0 --record /tmp/person --record-from 25 --every 2   # walker
+ffmpeg -framerate 30 -pattern_type glob -i "/tmp/arm/*.png" \
+       -c:v libx264 -pix_fmt yuv420p -crf 21 videos/arm_pick_place.mp4      # same for the others
 ```
 
-`videos/warehouse_overview.mp4` - 150 s real-time overview of one full operation cycle from a
-fixed wide-angle corner camera (the whole floor in one frame; both forklifts complete a delivery
-in the last ten seconds):
-
-```bash
-./python.sh ~/warehouse/step3_autonomy.py --headless --steps 9000 --record /tmp/ov --every 3
-ffmpeg -framerate 20 -pattern_type glob -i "/tmp/ov/*.png" \
-    -c:v libx264 -pix_fmt yuv420p -crf 18 videos/warehouse_overview.mp4
-```
+The GUI clip is a screen capture of the Isaac Sim window (`ffmpeg -f x11grab`), the dashboard
+clip a Playwright browser recording.
 
 ## Dressing and lighting
 
@@ -96,8 +175,26 @@ logic.py             Sim: belts, arms, carters, forklifts, traffic arbitration
 hw_isaac.py          hardware abstraction for the two arms
 usd_kin.py           arm kinematics + collision filtering
 step3_autonomy.py    builds the scene and runs the loop (CLI above)
+ros_bridge.py        ROS 2 node /warehouse_sim inside the Isaac Sim process (topics, services, cameras)
+wms_node.py          ROS 2 WMS node: auto/manual orders, tracks each order to the pallet
+warehouse.sh         starts/stops sim + WMS + rosbridge + web dashboard
+web/                 dashboard (static; roslib over rosbridge)
+tools/ros_smoke.py   end-to-end ROS 2 check
 check_*.py, test_*.py, debug_retarget.py, inspect_*.py   asset/retarget probes used during bring-up
 ```
+
+## Traffic between people and robots
+
+People and props have right of way; robots yield. Three gridlocks showed up only in 20-minute runs
+and are fixed:
+
+* a walker that ended a route inside an obstacle's comfort margin was refused every step and
+  re-planned forever - it now keeps its route, finishes turning, and may cross the margin (never the
+  obstacle) after 1.5 s;
+* a carter inside a person's clearance ring had its speed zeroed every frame, even when backing away,
+  while the person waited for the carter - carters may now move away, only closing in is refused;
+* the roamer carter (C3) gave up a must-reach goal and fell through to a blind straight drive -
+  must-reach goals are never abandoned; and two walkers meeting head-on now pass shoulder to shoulder.
 
 ## Known limitations
 

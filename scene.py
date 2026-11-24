@@ -4,12 +4,13 @@ import random
 import numpy as np
 
 
-def build(stage, pallet_boxes=True, legacy_statics=True):
-    from pxr import Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade, Gf, Sdf, PhysxSchema
+def build(stage, pallet_boxes=True, legacy_statics=True, building_url=None):
+    """building_url: full URL of an environment USD to put around the zone (its walls, ceiling,
+    floor and lamps replace the plain shell), or None for the plain 26 x 16 m room."""
+    from pxr import UsdGeom, UsdPhysics, UsdShade, Gf, Sdf
 
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.Xform.Define(stage, "/World/Warehouse")
-
 
     def material(path, rgb, rough=0.7, metal=0.0):
         m = UsdShade.Material.Define(stage, path)
@@ -21,7 +22,6 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
         m.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
         return m
 
-
     MATS = {
         "floor": material("/World/Looks/floor", (0.35, 0.35, 0.37), 0.9),
         "wall": material("/World/Looks/wall", (0.75, 0.75, 0.72), 0.9),
@@ -32,7 +32,6 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
         "marker": material("/World/Looks/marker", (0.9, 0.7, 0.1), 0.8),
         "ped": material("/World/Looks/ped", (0.25, 0.25, 0.3), 0.6, 0.5),
     }
-
 
     def box(path, size, pos, mat=None, collide=True, body=None, mass=None):
         """body: None/'static' | 'kinematic' | 'dynamic'"""
@@ -54,7 +53,60 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
             UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(mass)
         return prim
 
+    hx, hy = C.ROOM_X / 2, C.ROOM_Y / 2
+    if building_url:
+        _building(stage, building_url, box, material)
+    else:
+        _shell(stage, box, material)
 
+    # Legacy step-1 dressing: it hangs racks high on the west wall and scatters crates in
+    # mid-air, and it knows nothing about pickup/drop zones. Step 3 has its own grounded,
+    # keep-out-aware dressing (statics.py), so it switches this off.
+    if legacy_statics:
+        _legacy_statics(box, hx, hy)
+
+    # (dynamic people and moving props are built by people.py and returned to the caller separately)
+    return _conveyors_and_markers(stage, box, pallet_boxes)
+
+
+def _building(stage, url, box, material):
+    """Reference the environment, keep only an invisible collision floor of our own, and mark the
+    zone with yellow floor tape so the operating area reads as a marked cell on the hall floor."""
+    from pxr import UsdGeom, UsdShade, UsdLux, Gf
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    prim = add_reference_to_stage(usd_path=url, prim_path="/World/Building")
+    xf = UsdGeom.Xformable(prim)
+    xf.ClearXformOpOrder()
+    xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*C.BUILDING_OFFSET))
+    # physics floor (the hall's floor meshes are visual): invisible, but crates/props still land on it
+    floor = box("/World/Warehouse/CollisionFloor", (80.0, 80.0, 0.2), (0, 0, -0.1), None)
+    UsdGeom.Imageable(floor).MakeInvisible()
+    tape = material("/World/Looks/tape", (0.95, 0.75, 0.05), 0.6)
+    hx, hy, w = C.ROOM_X / 2, C.ROOM_Y / 2, C.ZONE_TAPE_W
+    for nm, size, pos in (("N", (C.ROOM_X + w, w, 0.004), (0, hy, 0.002)),
+                          ("S", (C.ROOM_X + w, w, 0.004), (0, -hy, 0.002)),
+                          ("E", (w, C.ROOM_Y + w, 0.004), (hx, 0, 0.002)),
+                          ("W", (w, C.ROOM_Y + w, 0.004), (-hx, 0, 0.002))):
+        p = box(f"/World/Warehouse/Tape{nm}", size, pos, None, collide=False)
+        UsdShade.MaterialBindingAPI(p).Bind(tape)
+    # the hall's own lamps light it; a faint dome keeps the shadowed sides of the robots readable
+    dome = UsdLux.DomeLight.Define(stage, "/World/Lights/Dome")
+    dome.CreateIntensityAttr(C.DOME_INTENSITY * C.BUILDING_DOME_SCALE)
+    dome.CreateColorAttr(Gf.Vec3f(0.88, 0.92, 1.0))
+    x0, x1, y0, y1 = building_interior()
+    print(f"[scene] building {url.split('/')[-1]} around the zone: interior x {x0:.1f}..{x1:.1f}, "
+          f"y {y0:.1f}..{y1:.1f} m")
+
+
+def building_interior():
+    """Inner wall faces of the building in the zone frame (x0, x1, y0, y1)."""
+    x0, x1, y0, y1 = C.BUILDING_INTERIOR
+    ox, oy, _ = C.BUILDING_OFFSET
+    return (x0 + ox, x1 + ox, y0 + oy, y1 + oy)
+
+
+def _shell(stage, box, material):
+    from pxr import UsdGeom, UsdLux, UsdShade, Gf, Sdf
     # ---------- shell: floor, 4 walls, ceiling -------------------------------
     hx, hy = C.ROOM_X / 2, C.ROOM_Y / 2
     box("/World/Warehouse/Floor", (C.ROOM_X + 1, C.ROOM_Y + 1, 0.2), (0, 0, -0.1), "floor")
@@ -71,34 +123,6 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
     ceiling = box("/World/Warehouse/Ceiling", (C.ROOM_X + C.WALL_T * 2, C.ROOM_Y + C.WALL_T * 2, C.WALL_T),
                   (0, 0, C.WALL_H + C.WALL_T / 2), None)
     UsdShade.MaterialBindingAPI(ceiling).Bind(ceil_mat)
-
-    # ---------- static warehouse obstacles (racks, crates) -------------------
-    # Legacy step-1 dressing: it hangs racks high on the west wall and scatters crates in
-    # mid-air, and it knows nothing about pickup/drop zones. Step 3 has its own grounded,
-    # keep-out-aware dressing (statics.py), so it switches this off.
-    if legacy_statics:
-        rack_h, rack_w, rack_d = 2.4, 0.3, 1.8  # height, width (into room), depth
-        rack_h_gap = 0.6  # vertical gap between shelves
-        for row in range(3):
-            for col in range(2):
-                rx = -hx + 1.0 + col * (rack_d + 0.2)   # just inside the east wall
-                rz = hy - 1.5 - row * (rack_h + rack_h_gap)  # start high, step down
-                if rz > 0.5:  # only place racks that fit
-                    # rack base frame
-                    box(f"/World/Static/RackFrame_{row}_{col}", (rack_d, rack_w, rack_h),
-                        (rx, 0, rz + rack_h / 2), "frame")
-                    # one shelf per rack
-                    shelf_z = rz + rack_h + 0.15
-                    box(f"/World/Static/RackShelf_{row}_{col}", (rack_d - 0.2, 0.8, 0.08),
-                        (rx + 0.1, 0, shelf_z), "frame")
-
-        # A few scattered crates as obstacles (grounded, so nothing floats)
-        for i in range(5):
-            cx = random.uniform(-hx + 2, hx - 2)
-            cy = random.uniform(-hy + 2, hy - 2)
-            box(f"/World/Static/Crate_{i}", (0.8, 0.5, 0.4), (cx, cy, 0.2), "pkg")
-
-    # (dynamic people and moving props are built by people.py and returned to the caller separately)
 
     # ---------- lighting: ceiling fixture grid + soft ambient fill -----------
     # one visible glowing panel per light so the ceiling reads as a lit warehouse
@@ -128,6 +152,26 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
     dome = UsdLux.DomeLight.Define(stage, "/World/Lights/Dome")
     dome.CreateIntensityAttr(C.DOME_INTENSITY)
     dome.CreateColorAttr(Gf.Vec3f(0.88, 0.92, 1.0))
+
+
+def _legacy_statics(box, hx, hy):
+    rack_h, rack_w, rack_d = 2.4, 0.3, 1.8  # height, width (into room), depth
+    for row in range(3):
+        for col in range(2):
+            rx = -hx + 1.0 + col * (rack_d + 0.2)   # just inside the east wall
+            rz = hy - 1.5 - row * (rack_h + 0.6)    # start high, step down
+            if rz > 0.5:  # only place racks that fit
+                box(f"/World/Static/RackFrame_{row}_{col}", (rack_d, rack_w, rack_h), (rx, 0, rz + rack_h / 2), "frame")
+                box(f"/World/Static/RackShelf_{row}_{col}", (rack_d - 0.2, 0.8, 0.08), (rx + 0.1, 0, rz + rack_h + 0.15), "frame")
+    # A few scattered crates as obstacles (grounded, so nothing floats)
+    for i in range(5):
+        cx = random.uniform(-hx + 2, hx - 2)
+        cy = random.uniform(-hy + 2, hy - 2)
+        box(f"/World/Static/Crate_{i}", (0.8, 0.5, 0.4), (cx, cy, 0.2), "pkg")
+
+
+def _conveyors_and_markers(stage, box, pallet_boxes):
+    from pxr import UsdGeom, Gf, PhysxSchema
 
     # ---------- conveyors ----------------------------------------------------
     def build_conveyor(tag, cfg):
@@ -162,7 +206,6 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
         dock_y = y + sgn * C.DOCK_OFFSET_Y
         box(f"/World/Docks/Dock{tag}", (0.8, 0.6, 0.01), (C.PICK_X, dock_y, 0.005), "dock", collide=False)
         return (C.PICK_X, y)
-
 
     for tag, cfg in C.CONVEYORS.items():
         build_conveyor(tag, cfg)
@@ -201,6 +244,4 @@ def build(stage, pallet_boxes=True, legacy_statics=True):
             self.n += 1; self.live.append(p)
             return p
 
-
-    spawners = [Spawner(t, c["y"]) for t, c in C.CONVEYORS.items()]
-    return spawners
+    return [Spawner(t, c["y"]) for t, c in C.CONVEYORS.items()]

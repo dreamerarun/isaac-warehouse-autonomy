@@ -7,7 +7,7 @@ Step 3: autonomous warehouse.
     ./python.sh ~/warehouse/step3_autonomy.py
     ./python.sh ~/warehouse/step3_autonomy.py --headless --steps 36000     (10 min sim, no GUI)
 """
-import argparse, sys, os, math
+import argparse, sys, os, math, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.stdout.reconfigure(line_buffering=True)
 ap = argparse.ArgumentParser()
@@ -19,6 +19,15 @@ ap.add_argument("--shots", type=int, default=0, help="capture a viewport frame e
 ap.add_argument("--track", type=int, default=-1, help="cinematic follow-cam on person N (-1 = fixed camera)")
 ap.add_argument("--record", default="", help="directory to write a numbered frame sequence of the tracked shot")
 ap.add_argument("--every", type=int, default=2, help="with --record: one frame every N physics steps (2 = 30 fps)")
+ap.add_argument("--record-from", type=float, default=0.0, help="with --record: start recording at this sim time (s)")
+ap.add_argument("--view", default="", help="fixed camera 'ex,ey,ez,tx,ty,tz' (eye, target in metres) instead of the overview")
+ap.add_argument("--focal", type=float, default=9.0, help="focal length (mm) of the fixed camera")
+ap.add_argument("--room", action="store_true", help="plain 26 x 16 m shell instead of the NVIDIA warehouse building")
+ap.add_argument("--ros", action="store_true", help="ROS 2 interface (topics, services, cameras) - see ros_bridge.py")
+ap.add_argument("--orders", action="store_true", help="belts release crates only against /warehouse/orders (WMS)")
+ap.add_argument("--realtime", action="store_true", help="pace the simulation to wall-clock time")
+ap.add_argument("--cam-hz", type=float, default=4.0, help="with --ros: camera frame rate")
+ap.add_argument("--no-cams", action="store_true", help="with --ros: no camera topics (saves rendering)")
 args, _ = ap.parse_known_args()
 
 import config as C
@@ -38,6 +47,9 @@ root = get_assets_root_path()
 if not root:
     raise SystemExit("No asset root - check internet connection")
 A = C.ASSETS
+building_url = None if (args.room or not C.BUILDING_URL) else f"{root}/{C.BUILDING_URL}"
+if building_url:
+    C.WALL_H = C.BUILDING_CEILING_H          # structural columns run up to the hall's ceiling
 
 # =============================================================================================
 # Phase 0: measure the real assets off-screen and derive every size from them
@@ -86,7 +98,7 @@ print(f"[step3] pick point x={C.PICK_X:.2f}; dock {C.DOCK_OFFSET_Y:.2f} m from t
 world = World(stage_units_in_meters=1.0, physics_dt=DT, rendering_dt=2 * DT)
 stage = omni.usd.get_context().get_stage()
 UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-scene.build(stage, pallet_boxes=False, legacy_statics=False)   # shell + conveyors + lights (step-3 dressing is statics.py)
+scene.build(stage, pallet_boxes=False, legacy_statics=False, building_url=building_url)   # shell + conveyors + lights (step-3 dressing is statics.py)
 
 arm_specs = {}
 for tag, cfg in C.CONVEYORS.items():
@@ -163,13 +175,18 @@ def _overview_cam():
     try:
         cam = UsdGeom.Camera.Get(omni.usd.get_context().get_stage(), path) or \
             UsdGeom.Camera.Define(omni.usd.get_context().get_stage(), path)
-        cam.GetFocalLengthAttr().Set(9.0)
+        cam.GetFocalLengthAttr().Set(float(args.focal))
         cam.GetHorizontalApertureAttr().Set(20.955)
         cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
         # aimed well below the far wall: the eye sits 0.2 m under the ceiling, so a shallow
         # pitch would fill the top third of the frame with the unlit ceiling underside
-        set_camera_view(eye=np.array([-10.6, -6.0, 4.70]),
-                        target=np.array([13.4, 5.8, -7.4]), camera_prim_path=path)
+        eye, tgt = np.array([-10.6, -6.0, 4.70]), np.array([13.4, 5.8, -7.4])
+        if building_url:                    # 9 m hall: higher eye, the rack aisles show beyond the cell
+            eye, tgt = np.array(C.OVERVIEW_EYE), np.array(C.OVERVIEW_TARGET)
+        if args.view:
+            v = [float(s) for s in args.view.split(",")]
+            eye, tgt = np.array(v[:3]), np.array(v[3:6])
+        set_camera_view(eye=eye, target=tgt, camera_prim_path=path)
         get_active_viewport().camera_path = path
         print(f"[step3] overview camera {path} focal={cam.GetFocalLengthAttr().Get():.2f}", flush=True)
     except Exception as e:
@@ -203,7 +220,7 @@ def _follow_cam(eye, target):
 
 # camera stays *inside* the warehouse (the shell has a ceiling at z=5.1, so a higher eye
 # only sees the roof and every capture comes out black)
-if not args.headless or args.shots or args.record:
+if not args.headless or args.shots or args.record or args.ros:
     _overview_cam()
 
 world.reset()
@@ -220,7 +237,25 @@ for a in arms.values():
 
 hw = IsaacHW(stage, carter_paths, fork_info, pallet_paths, arms)
 sim = Sim(hw, arms, seed=args.seed, people=people)
+sim.order_mode = bool(args.orders)
 sim.start()
+
+bridge = None
+if args.ros:
+    from ros_bridge import RosBridge
+    bi = None
+    if building_url:
+        x0, x1, y0, y1 = scene.building_interior()
+        bi = dict(x0=x0, x1=x1, y0=y0, y1=y1)
+    vp_rp = None
+    if not args.headless:                 # the window shows the overview camera: reuse its frames
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            vp_rp = get_active_viewport().render_product_path
+        except Exception as e:
+            print(f"[step3] viewport render product unavailable ({e}); overview renders separately", flush=True)
+    bridge = RosBridge(sim, people, hw, arms, stage, building=bi, cameras=not args.no_cams, cam_hz=args.cam_hz,
+                       viewport_rp=vp_rp)
 
 step, checked = 0, False
 shot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots")
@@ -248,15 +283,54 @@ def _capture_frame(path):
 
 
 _cam = {"eye": None, "tgt": None}
+GUI_EVERY = max(1, int(os.environ.get("GUI_EVERY", "2")))
+if not args.headless:
+    # the hall is a heavy RTX scene: render the window at 1280x720 with DLSS in performance mode
+    # so the GUI run keeps (close to) real time; GUI_EVERY=3 trades window fps for more speed
+    try:
+        import carb
+        from omni.kit.viewport.utility import get_active_viewport
+        carb.settings.get_settings().set("/rtx/post/dlss/execMode", 0)
+        get_active_viewport().resolution = (C.RENDER_W, C.RENDER_H)
+        print(f"[step3] GUI: viewport {C.RENDER_W}x{C.RENDER_H}, DLSS performance, a frame every "
+              f"{GUI_EVERY} physics steps", flush=True)
+    except Exception as e:
+        print(f"[step3] GUI render tuning skipped: {e}", flush=True)
+t_phys = 0.0                                  # physics time; people walk on it (they keep going in an e-stop)
+wall0 = time.monotonic()
+rtf_mark = (0.0, wall0)
 while app.is_running():
+    if bridge is not None and bridge.paused:
+        if world.is_playing():
+            world.pause()
+        app.update()
+        bridge.spin_idle()
+        time.sleep(0.02)
+        wall0 = time.monotonic() - t_phys        # real-time pacing restarts from here
+        continue
+    if bridge is not None and not world.is_playing():
+        world.play()
     shot = bool(args.shots) and step % args.shots == 0
-    frame = bool(args.record) and step % max(args.every, 1) == 0
-    world.step(render=not args.headless or shot or frame or args.track >= 0)
+    frame = bool(args.record) and step % max(args.every, 1) == 0 and step * DT >= args.record_from
+    want = bridge.want_render() if bridge is not None else False
+    gui_frame = not args.headless and step % GUI_EVERY == 0   # window frame rate = 60 / GUI_EVERY fps
+    world.step(render=gui_frame or shot or frame or args.track >= 0 or want)
     sim.step()
+    t_phys += DT
     # dynamic people/props: plan their routes, walk them, write their transforms, loop the walk clip
-    people_mod.step(people, DT, sim.t,
+    people_mod.step(people, DT, t_phys,
                     obstacles=lambda: [(c.mob.x, c.mob.y, C.CARTER_RADIUS)
                                        for c in sim.carters.values()])
+    if bridge is not None:
+        now = time.monotonic()
+        if now - rtf_mark[1] >= 2.0:
+            bridge.rtf = (t_phys - rtf_mark[0]) / (now - rtf_mark[1])
+            rtf_mark = (t_phys, now)
+        bridge.after_step(t_phys, rendered=want)
+    if args.realtime:
+        ahead = t_phys - (time.monotonic() - wall0)
+        if ahead > 0:
+            time.sleep(ahead)
     if 0 <= args.track < len(people):
         from isaacsim.core.utils.viewports import set_camera_view
         m0 = people[args.track]["mob"]
@@ -325,6 +399,16 @@ while app.is_running():
                 continue
             if 0.20 < float(mn[2]) < 2.0 and float(mx[0] - mn[0]) < 2.5 and float(mx[1] - mn[1]) < 2.5:
                 print(f"[diag] {prim.GetPath()} xy {(mn[0]+mx[0])/2:.2f},{(mn[1]+mx[1])/2:.2f} z {mn[2]:.2f}..{mx[2]:.2f}", flush=True)
+    diag_every = float(os.environ.get("CARTER_DIAG", "0") or 0)
+    if diag_every and step % max(int(diag_every / DT), 1) == 0:
+        for c in sim.carters.values():
+            print(f"[diag {sim.t:6.1f}s] {c.name} ({c.mob.x:6.2f},{c.mob.y:6.2f}) yaw {math.degrees(c.mob.yaw):6.1f} "
+                  f"v {c.mob.v:5.2f} job {c.job[0].tag if c.job else '-'} parked {c.parked} evading {c.evading} "
+                  f"pblk {c._people_blocked} | {sim.status.get(c.name, '')}", flush=True)
+        for p in people:
+            m = p["mob"]
+            print(f"[diag {sim.t:6.1f}s]   {p['name']} ({m.x:6.2f},{m.y:6.2f}) v {m.v:4.2f} path {len(p['path'] or [])} "
+                  f"goal {p['goal_idx']} fails {p.get('plan_fails', 0)} block '{p.get('block_reason', '')}'", flush=True)
     if step % int(120 / DT) == 0:
         print(f"[status {sim.t:6.0f}s] delivered {{{', '.join(f'{k}: {f.delivered}' for k, f in sim.forks.items())}}} "
               f"| closest carters {sim.min_sep:.2f} m | closest person {sim.min_person_sep:.2f} m", flush=True)
@@ -340,4 +424,6 @@ for p in people:
     print(f"[step3 people] summary {p['name']}: blocked {p.get('blocked_s', 0.0):.1f} s in "
           f"{p.get('blocks', 0)} frames, longest run {p.get('max_block_s', 0.0):.2f} s, "
           f"ended in '{p.get('anim_state', '-')}' pose", flush=True)
+if bridge is not None:
+    bridge.shutdown()
 app.close()
