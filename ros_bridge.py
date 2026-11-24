@@ -38,7 +38,7 @@ def _yaw_q(yaw):
 
 class RosBridge:
     def __init__(self, sim, people, hw, arms, stage, building=None, cameras=True, cam_hz=4.0,
-                 cam_res=(1280, 720), jpeg_q=75):
+                 cam_res=(1280, 720), jpeg_q=75, viewport_rp=None):
         import rclpy
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
@@ -110,7 +110,7 @@ class RosBridge:
         self.cameras = None
         if cameras:
             try:
-                self.cameras = _Cameras(stage, cam_res, jpeg_q)
+                self.cameras = _Cameras(stage, cam_res, jpeg_q, viewport_rp)
                 self.cam_every = max(1, int(round(1.0 / (cam_hz * C_DT()))))
             except Exception as e:
                 n.get_logger().error(f"cameras disabled: {e}")
@@ -505,7 +505,7 @@ def C_DT():
 class _Cameras:
     """Overview + follow render products read back through Replicator rgb annotators."""
 
-    def __init__(self, stage, res, q):
+    def __init__(self, stage, res, q, viewport_rp=None):
         import omni.replicator.core as rep
         from pxr import UsdGeom, Gf
         self.q = q
@@ -518,7 +518,10 @@ class _Cameras:
                 cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
         self.ann = {}
         for k, p in self.paths.items():
-            rp = rep.create.render_product(p, tuple(res))
+            if k == "overview" and viewport_rp:
+                rp = viewport_rp          # GUI: the window already renders this view - read it back
+            else:                         # instead of rendering the same view a second time
+                rp = rep.create.render_product(p, tuple(res))
             a = rep.AnnotatorRegistry.get_annotator("rgb")
             a.attach([rp])
             self.ann[k] = a

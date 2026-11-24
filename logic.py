@@ -887,7 +887,7 @@ class Sim:
                 self.log(f"{f.name}: pallet full ({len(f.stack)} crates) -> shipped, fresh pallet in place")
                 f.stack = []
             slot = self._slot(f, len(f.stack))
-            self.log(f"{f.name}: placing on pallet slot {f.delivered}")
+            self.log(f"{f.name}: placing crate {len(f.stack) + 1}/{cap} on the pallet")
             yield from self._flift(f, self._touch(f, slot[2]) + 0.03)
             yield from self._fdrive(f, slot[0] + f.Ctip, slot[1])
             yield from self._flift(f, self._touch(f, slot[2]))     # crate rests on the pallet / crate below

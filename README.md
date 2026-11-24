@@ -60,6 +60,12 @@ Useful flags:
 ./warehouse.sh start --gui    # Isaac Sim window on the local display as well
 ```
 
+With `--gui` the window renders at 1280x720 with DLSS in performance mode, a frame every second
+physics step (30 fps), and the ROS overview camera reads its frames from the window instead of
+rendering the view twice: on a GB10 that keeps the cell at real time. `GUI_EVERY=3` (20 fps) buys
+more headroom on a slower GPU. Over SSH, point it at the desktop session, e.g.
+`DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority ./warehouse.sh start --gui`.
+
 Open `http://<host>:8090/` (the cell needs a few minutes to load its assets). Everything runs on
 ROS 2 Jazzy, `ROS_DOMAIN_ID=42` by default (`ROS_DOMAIN_ID=.. ./warehouse.sh start` to change), so
 any ROS 2 machine on the LAN with the same domain sees the topics (RViz: fixed frame `map`,
@@ -118,27 +124,33 @@ locked to ground speed even when rendering and physics run at different rates.
 
 ## Videos
 
-`videos/person{0,1,2}.mp4` - 10 s side-tracking cinematic of each character walking its route,
-captured with `--track`:
+Click a picture to play the clip (all recorded on a DGX Spark / GB10 with Isaac Sim 6.2).
+
+| | |
+| --- | --- |
+| [![overview](videos/posters/warehouse_overview.jpg)](videos/warehouse_overview.mp4) | [![dashboard](videos/posters/web_dashboard.jpg)](videos/web_dashboard.mp4) |
+| **Overview** - one full cycle (150 s, real time): belts, both arms, carters, forklifts stacking, people walking | **Web dashboard** over ROS 2: live map, fleet, orders, cameras, e-stop and release |
+| [![arm](videos/posters/arm_pick_place.jpg)](videos/arm_pick_place.mp4) | [![forklift](videos/posters/forklift_handoff.jpg)](videos/forklift_handoff.mp4) |
+| **UR5 pick and place** - suction pick from the belt onto a Nova Carter | **Forklift hand-off** - forks under the crate on the carter, then onto the pallet |
+| [![person](videos/posters/person_walk.jpg)](videos/person_walk.mp4) | [![gui](videos/posters/isaac_sim_gui.jpg)](videos/isaac_sim_gui.mp4) |
+| **Walker** - retargeted walk clip, feet planted, tracking shot | **Isaac Sim GUI** - the stack started with `./warehouse.sh start --gui` |
+
+How they were made (seed 0, so the events land at the same times):
 
 ```bash
-for i in 0 1 2; do
-  ./python.sh ~/warehouse/step3_autonomy.py --headless --steps 600 --track $i \
-      --record /tmp/frames_$i --every 2
-  ffmpeg -framerate 30 -pattern_type glob -i "/tmp/frames_$i/*.png" \
-      -c:v libx264 -pix_fmt yuv420p -crf 20 videos/person$i.mp4
-done
+R="./run.sh --headless"
+$R --steps 9000 --record /tmp/ov --every 3                                   # overview, 20 fps
+$R --steps 3360 --record /tmp/arm --record-from 30 --every 2 \
+   --view=-4.0,1.6,2.3,-6.4,4.3,0.9 --focal 16                               # arm, 30 fps
+$R --steps 8800 --record /tmp/fork --record-from 110 --every 2 \
+   --view=8.6,0.6,1.7,8.6,4.2,0.6 --focal 11                                 # forklift
+$R --steps 2700 --track 0 --record /tmp/person --record-from 25 --every 2   # walker
+ffmpeg -framerate 30 -pattern_type glob -i "/tmp/arm/*.png" \
+       -c:v libx264 -pix_fmt yuv420p -crf 21 videos/arm_pick_place.mp4      # same for the others
 ```
 
-`videos/warehouse_overview.mp4` - 150 s real-time overview of one full operation cycle from a
-fixed wide-angle corner camera (the whole floor in one frame; both forklifts complete a delivery
-in the last ten seconds):
-
-```bash
-./python.sh ~/warehouse/step3_autonomy.py --headless --steps 9000 --record /tmp/ov --every 3
-ffmpeg -framerate 20 -pattern_type glob -i "/tmp/ov/*.png" \
-    -c:v libx264 -pix_fmt yuv420p -crf 18 videos/warehouse_overview.mp4
-```
+The GUI clip is a screen capture of the Isaac Sim window (`ffmpeg -f x11grab`), the dashboard
+clip a Playwright browser recording.
 
 ## Dressing and lighting
 

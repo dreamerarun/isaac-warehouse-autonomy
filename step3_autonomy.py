@@ -19,6 +19,7 @@ ap.add_argument("--shots", type=int, default=0, help="capture a viewport frame e
 ap.add_argument("--track", type=int, default=-1, help="cinematic follow-cam on person N (-1 = fixed camera)")
 ap.add_argument("--record", default="", help="directory to write a numbered frame sequence of the tracked shot")
 ap.add_argument("--every", type=int, default=2, help="with --record: one frame every N physics steps (2 = 30 fps)")
+ap.add_argument("--record-from", type=float, default=0.0, help="with --record: start recording at this sim time (s)")
 ap.add_argument("--view", default="", help="fixed camera 'ex,ey,ez,tx,ty,tz' (eye, target in metres) instead of the overview")
 ap.add_argument("--focal", type=float, default=9.0, help="focal length (mm) of the fixed camera")
 ap.add_argument("--room", action="store_true", help="plain 26 x 16 m shell instead of the NVIDIA warehouse building")
@@ -246,7 +247,15 @@ if args.ros:
     if building_url:
         x0, x1, y0, y1 = scene.building_interior()
         bi = dict(x0=x0, x1=x1, y0=y0, y1=y1)
-    bridge = RosBridge(sim, people, hw, arms, stage, building=bi, cameras=not args.no_cams, cam_hz=args.cam_hz)
+    vp_rp = None
+    if not args.headless:                 # the window shows the overview camera: reuse its frames
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            vp_rp = get_active_viewport().render_product_path
+        except Exception as e:
+            print(f"[step3] viewport render product unavailable ({e}); overview renders separately", flush=True)
+    bridge = RosBridge(sim, people, hw, arms, stage, building=bi, cameras=not args.no_cams, cam_hz=args.cam_hz,
+                       viewport_rp=vp_rp)
 
 step, checked = 0, False
 shot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots")
@@ -274,6 +283,19 @@ def _capture_frame(path):
 
 
 _cam = {"eye": None, "tgt": None}
+GUI_EVERY = max(1, int(os.environ.get("GUI_EVERY", "2")))
+if not args.headless:
+    # the hall is a heavy RTX scene: render the window at 1280x720 with DLSS in performance mode
+    # so the GUI run keeps (close to) real time; GUI_EVERY=3 trades window fps for more speed
+    try:
+        import carb
+        from omni.kit.viewport.utility import get_active_viewport
+        carb.settings.get_settings().set("/rtx/post/dlss/execMode", 0)
+        get_active_viewport().resolution = (C.RENDER_W, C.RENDER_H)
+        print(f"[step3] GUI: viewport {C.RENDER_W}x{C.RENDER_H}, DLSS performance, a frame every "
+              f"{GUI_EVERY} physics steps", flush=True)
+    except Exception as e:
+        print(f"[step3] GUI render tuning skipped: {e}", flush=True)
 t_phys = 0.0                                  # physics time; people walk on it (they keep going in an e-stop)
 wall0 = time.monotonic()
 rtf_mark = (0.0, wall0)
@@ -289,9 +311,10 @@ while app.is_running():
     if bridge is not None and not world.is_playing():
         world.play()
     shot = bool(args.shots) and step % args.shots == 0
-    frame = bool(args.record) and step % max(args.every, 1) == 0
+    frame = bool(args.record) and step % max(args.every, 1) == 0 and step * DT >= args.record_from
     want = bridge.want_render() if bridge is not None else False
-    world.step(render=not args.headless or shot or frame or args.track >= 0 or want)
+    gui_frame = not args.headless and step % GUI_EVERY == 0   # window frame rate = 60 / GUI_EVERY fps
+    world.step(render=gui_frame or shot or frame or args.track >= 0 or want)
     sim.step()
     t_phys += DT
     # dynamic people/props: plan their routes, walk them, write their transforms, loop the walk clip

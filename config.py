@@ -16,8 +16,8 @@ BUILDING_OFFSET = (10.435, 4.2, 0.0)                 # asset frame -> zone frame
 BUILDING_INTERIOR = (-26.03, 5.16, -23.4, 30.6)      # inner wall faces (x0, x1, y0, y1), asset frame, measured
 BUILDING_CEILING_H = 9.0
 ZONE_TAPE_W = 0.10                                   # yellow floor tape around the zone
-OVERVIEW_EYE = (-1.5, -17.5, 7.2)                    # overview camera inside the hall (zone frame): south side,
-OVERVIEW_TARGET = (0.5, 2.5, 0.0)                    # whole cell in frame, rack aisles behind it
+OVERVIEW_EYE = (0.0, -14.0, 7.5)                     # overview camera inside the hall (zone frame): south side,
+OVERVIEW_TARGET = (0.0, 0.5, -0.5)                   # whole cell across the frame, rack aisles behind it
 BUILDING_DOME_SCALE = 0.5                            # ambient fill relative to DOME_INTENSITY inside the hall
 
 # ---- conveyors (two feeds, mirrored in y) -----------------------------
