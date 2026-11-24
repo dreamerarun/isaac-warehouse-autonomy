@@ -335,6 +335,7 @@ class IsaacHW:
                       for n, i in fork_info.items()}
         self.pallet_paths = pallet_paths
         self.n_spawn = {}
+        self.pkgs = {}                               # name -> IsaacPkg, everything currently in the scene
         self.yaw_off = C.CARTER_VISUAL_YAW_OFFSET_DEG
 
     def spawn_pkg(self, tag):
@@ -343,7 +344,27 @@ class IsaacHW:
         L, D, H = C.PKG_SIZE
         y = C.CONVEYORS[tag]["y"]
         pos = (C.BELT_START_X + L / 2 + 0.15, y, C.BELT_H + H / 2 + 0.02)
-        return IsaacPkg(make_crate(self.stage, f"/World/Packages/Crate{tag}_{n}", pos))
+        pkg = IsaacPkg(make_crate(self.stage, f"/World/Packages/Crate{tag}_{n}", pos))
+        pkg.name = f"Crate{tag}_{n}"
+        self.pkgs[pkg.name] = pkg
+        return pkg
+
+    def remove_pkg(self, pkg):
+        """A shipped crate leaves the scene."""
+        self.pkgs.pop(getattr(pkg, "name", None), None)
+        try:
+            self.stage.RemovePrim(pkg.prim.GetPath())
+        except Exception as e:
+            print(f"[hw] could not remove {getattr(pkg, 'name', pkg)}: {e}")
+
+    def set_belts_running(self, on):
+        """E-stop stops the conveyors too (PhysX surface velocity)."""
+        from pxr import PhysxSchema, Gf
+        for tag in C.CONVEYORS:
+            p = self.stage.GetPrimAtPath(f"/World/Conveyor{tag}/Belt")
+            if p:
+                PhysxSchema.PhysxSurfaceVelocityAPI(p).GetSurfaceVelocityAttr().Set(
+                    Gf.Vec3f(C.BELT_SPEED if on else 0.0, 0, 0))
 
     def carter_set(self, name, x, y, yaw):
         self.carter_ops[name].set(x, y, C.CARTER_Z0, math.degrees(yaw) + self.yaw_off)

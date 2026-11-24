@@ -6,6 +6,20 @@ ROOM_Y = 16.0          # width   (y from -8 to +8)
 WALL_H = 5.0
 WALL_T = 0.3
 
+# ---- building around the operating zone ---------------------------------
+# NVIDIA's full_warehouse (racked storage hall, 31 x 54 m, 9 m ceiling, its own ceiling lamps).
+# Its south half is open floor (pillars only at the walls), so the zone above sits there with
+# the building's rack aisles ~5 m to the north. Set BUILDING_URL = "" (or --room) for the old
+# plain 26 x 16 m shell.
+BUILDING_URL = "Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
+BUILDING_OFFSET = (10.435, 4.2, 0.0)                 # asset frame -> zone frame
+BUILDING_INTERIOR = (-26.03, 5.16, -23.4, 30.6)      # inner wall faces (x0, x1, y0, y1), asset frame, measured
+BUILDING_CEILING_H = 9.0
+ZONE_TAPE_W = 0.10                                   # yellow floor tape around the zone
+OVERVIEW_EYE = (-1.5, -17.5, 7.2)                    # overview camera inside the hall (zone frame): south side,
+OVERVIEW_TARGET = (0.5, 2.5, 0.0)                    # whole cell in frame, rack aisles behind it
+BUILDING_DOME_SCALE = 0.5                            # ambient fill relative to DOME_INTENSITY inside the hall
+
 # ---- conveyors (two feeds, mirrored in y) -----------------------------
 BELT_LEN = 6.0
 BELT_W = 0.6

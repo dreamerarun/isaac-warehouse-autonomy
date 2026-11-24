@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Warehouse Operations</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css?v=9">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>Warehouse Operations</h1>
+    <span class="brand-sub">Isaac Sim / ROS 2</span>
+  </div>
+  <div class="conn" id="conn" data-state="connecting">
+    <span class="dot" id="connDot"></span>
+    <span class="conn-text" id="connText">Connecting</span>
+  </div>
+  <dl class="simstats">
+    <div><dt>Sim time</dt><dd id="simTime">--:--</dd></div>
+    <div><dt>RTF</dt><dd id="simRtf">-</dd></div>
+    <div><dt>Mode</dt><dd id="simMode">-</dd></div>
+    <div><dt>State</dt><dd id="simState">no data</dd></div>
+  </dl>
+  <div class="top-actions">
+    <button type="button" id="btnPause" class="btn btn-lg btn-pause" disabled>PAUSE</button>
+    <button type="button" id="btnEstop" class="btn btn-lg btn-estop" disabled>E-STOP</button>
+  </div>
+</header>
+
+<div class="estop-banner" id="estopBanner" hidden>
+  <strong>EMERGENCY STOP ACTIVE</strong>
+  <span>All robots are halted. Clear the floor, then use RELEASE E-STOP to resume operation.</span>
+</div>
+
+<main class="layout">
+  <section class="col col-map">
+    <div class="kpis" id="kpis">
+      <div class="kpi" id="kpiDelivered"><span class="kpi-label">Delivered</span><span class="kpi-value">-</span><span class="kpi-sub">crates total</span></div>
+      <div class="kpi" id="kpiRate"><span class="kpi-label">Throughput</span><span class="kpi-value">-</span><span class="kpi-sub">crates / h</span></div>
+      <div class="kpi" id="kpiQueued"><span class="kpi-label">Queued</span><span class="kpi-value">-</span><span class="kpi-sub">orders, WMS</span></div>
+      <div class="kpi" id="kpiProgress"><span class="kpi-label">In progress</span><span class="kpi-value">-</span><span class="kpi-sub">orders, WMS</span></div>
+      <div class="kpi" id="kpiDone"><span class="kpi-label">Done</span><span class="kpi-value">-</span><span class="kpi-sub">orders, WMS</span></div>
+      <div class="kpi" id="kpiCarterSep"><span class="kpi-label" title="Closest carter-carter distance">Carter-carter</span><span class="kpi-value">-</span><span class="kpi-sub">closest, m</span></div>
+      <div class="kpi" id="kpiPersonSep" title="Closest carter-person distance; red below 1.0 m"><span class="kpi-label" title="Closest carter-person distance">Carter-person</span><span class="kpi-value">-</span><span class="kpi-sub">closest, m</span></div>
+      <div class="kpi" id="kpiYields"><span class="kpi-label">Person yields</span><span class="kpi-value">-</span><span class="kpi-sub">robot stops</span></div>
+    </div>
+
+    <section class="panel panel-map">
+      <div class="panel-head">
+        <h2>Floor map</h2>
+        <span class="panel-note" id="mapNote">waiting for layout</span>
+        <div class="legend" aria-label="Legend">
+          <span><i class="sw sw-ok"></i>moving</span>
+          <span><i class="sw sw-warn"></i>yielding</span>
+          <span><i class="sw sw-idle"></i>idle</span>
+          <span><i class="sw sw-parked"></i>parked</span>
+          <span><i class="sw sw-person"></i>person</span>
+          <span><i class="sw sw-prop"></i>prop</span>
+        </div>
+        <div class="seg" role="group" aria-label="Map extent">
+          <button type="button" class="seg-btn is-on" data-fit="zone">Zone</button>
+          <button type="button" class="seg-btn" data-fit="building">Building</button>
+        </div>
+      </div>
+      <div class="map-wrap" id="mapWrap">
+        <canvas id="map"></canvas>
+        <div class="tooltip" id="tooltip" hidden></div>
+      </div>
+    </section>
+
+    <section class="panel panel-fleet">
+      <div class="panel-head"><h2>Fleet</h2><span class="panel-note">click a row to follow</span></div>
+      <div class="table-wrap">
+        <table class="fleet">
+          <thead><tr><th class="c-name">Unit</th><th class="c-status">Status</th><th class="num">Speed m/s</th><th>Cargo</th><th>Detail</th></tr></thead>
+          <tbody id="fleetBody"><tr class="empty"><td colspan="5">No state received</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <section class="col col-mid">
+    <section class="panel panel-orders">
+      <div class="panel-head"><h2>Orders (WMS)</h2><span class="panel-note" id="wmsNote">no status</span></div>
+      <div class="orders-ctrl">
+        <div class="ctrl-row">
+          <span class="ctrl-label" title="WMS creates orders automatically">Auto<span class="long-label"> orders</span></span>
+          <button type="button" class="btn toggle" id="btnAuto" aria-pressed="false" disabled>OFF</button>
+          <label class="ctrl-label" for="inpPeriod">Period</label>
+          <input type="number" id="inpPeriod" min="1" max="3600" step="1" value="20" disabled>
+          <span class="unit">s</span>
+          <button type="button" class="btn" id="btnPeriod" disabled>Apply</button>
+        </div>
+        <div class="ctrl-row">
+          <button type="button" class="btn" id="btnOrderA" disabled>+1 order line A</button>
+          <button type="button" class="btn" id="btnOrderB" disabled>+1 order line B</button>
+          <span class="wms-rate" id="wmsRate"></span>
+        </div>
+      </div>
+      <div class="orders-list-wrap">
+        <table class="orders">
+          <thead><tr><th>Order</th><th>Line</th><th>State</th><th class="num" title="Sim time the order was created">Created</th><th class="num" title="Delivery time minus creation time; grey = still open (age)">Lead</th></tr></thead>
+          <tbody id="ordersBody"><tr class="empty"><td colspan="5">No orders</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel panel-events">
+      <div class="panel-head">
+        <h2>Event log</h2>
+        <span class="panel-note" id="eventCount">0</span>
+        <input type="search" id="eventFilter" class="filter" placeholder="Filter (e.g. C1, delivered)" aria-label="Filter events">
+        <button type="button" class="btn btn-sm" id="btnClearLog">Clear</button>
+      </div>
+      <ol class="events" id="events"></ol>
+    </section>
+  </section>
+
+  <section class="col col-right">
+    <section class="panel panel-cams">
+      <div class="panel-head"><h2>Cameras</h2></div>
+      <div class="cam" id="camOverview">
+        <div class="cam-head"><span class="cam-title">Overview</span><span class="cam-meta" data-meta>-</span></div>
+        <div class="cam-frame">
+          <img alt="Overview camera" data-img>
+          <div class="nosignal" data-nosig><span>NO SIGNAL</span><small data-nosig-text>waiting for frames</small></div>
+        </div>
+      </div>
+      <div class="cam" id="camFollow">
+        <div class="cam-head">
+          <span class="cam-title">Follow</span>
+          <select id="followSel" aria-label="Follow camera target"><option value="overview">overview</option></select>
+          <span class="cam-meta" data-meta>-</span>
+        </div>
+        <div class="cam-frame">
+          <img alt="Follow camera" data-img>
+          <div class="nosignal" data-nosig><span>NO SIGNAL</span><small data-nosig-text>waiting for frames</small></div>
+        </div>
+      </div>
+    </section>
+
+    <details class="panel panel-ros" id="rosPanel" open>
+      <summary class="panel-head"><h2>ROS</h2><span class="panel-note" id="rosUrl">-</span></summary>
+      <div class="ros-body">
+        <table class="ros">
+          <thead><tr><th>Name</th><th>Type</th><th>Dir</th><th class="num">Rate</th></tr></thead>
+          <tbody id="rosBody"></tbody>
+        </table>
+        <p class="ros-foot">Also on the bus, not used here: /carterN/odom, /tf, /map, /clock, joint_states.</p>
+      </div>
+    </details>
+  </section>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<dialog id="confirmDlg" class="dlg">
+  <form method="dialog">
+    <h3 id="confirmTitle">Confirm</h3>
+    <p id="confirmText"></p>
+    <div class="dlg-actions">
+      <button type="submit" value="cancel" class="btn">Cancel</button>
+      <button type="submit" value="ok" class="btn btn-danger" id="confirmOk">Confirm</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="vendor/roslib.min.js"></script>
+<script src="app.js?v=9"></script>
+</body>
+</html>
