@@ -19,6 +19,8 @@ ap.add_argument("--shots", type=int, default=0, help="capture a viewport frame e
 ap.add_argument("--track", type=int, default=-1, help="cinematic follow-cam on person N (-1 = fixed camera)")
 ap.add_argument("--record", default="", help="directory to write a numbered frame sequence of the tracked shot")
 ap.add_argument("--every", type=int, default=2, help="with --record: one frame every N physics steps (2 = 30 fps)")
+ap.add_argument("--view", default="", help="fixed camera 'ex,ey,ez,tx,ty,tz' (eye, target in metres) instead of the overview")
+ap.add_argument("--focal", type=float, default=9.0, help="focal length (mm) of the fixed camera")
 args, _ = ap.parse_known_args()
 
 import config as C
@@ -163,13 +165,16 @@ def _overview_cam():
     try:
         cam = UsdGeom.Camera.Get(omni.usd.get_context().get_stage(), path) or \
             UsdGeom.Camera.Define(omni.usd.get_context().get_stage(), path)
-        cam.GetFocalLengthAttr().Set(9.0)
+        cam.GetFocalLengthAttr().Set(float(args.focal))
         cam.GetHorizontalApertureAttr().Set(20.955)
         cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
         # aimed well below the far wall: the eye sits 0.2 m under the ceiling, so a shallow
         # pitch would fill the top third of the frame with the unlit ceiling underside
-        set_camera_view(eye=np.array([-10.6, -6.0, 4.70]),
-                        target=np.array([13.4, 5.8, -7.4]), camera_prim_path=path)
+        eye, tgt = np.array([-10.6, -6.0, 4.70]), np.array([13.4, 5.8, -7.4])
+        if args.view:
+            v = [float(s) for s in args.view.split(",")]
+            eye, tgt = np.array(v[:3]), np.array(v[3:6])
+        set_camera_view(eye=eye, target=tgt, camera_prim_path=path)
         get_active_viewport().camera_path = path
         print(f"[step3] overview camera {path} focal={cam.GetFocalLengthAttr().Get():.2f}", flush=True)
     except Exception as e:

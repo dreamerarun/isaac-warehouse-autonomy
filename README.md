@@ -19,6 +19,16 @@ placed, so a centimetre-authored asset can never end up 100x too big or floating
 ./python.sh ~/warehouse/step3_autonomy.py --headless --steps 600
 ```
 
+Or let `run.sh` find the interpreter (Isaac Sim 5.1 `python.sh`, or a pip-installed Isaac Sim 6.x
+venv such as the one on the DGX Spark / GB10, where it also preloads libgomp as aarch64 needs):
+
+```bash
+./run.sh --headless --steps 9000
+ISAAC_PY=~/isaacsim/python.sh ./run.sh          # pick a specific install
+```
+
+Built on Isaac Sim 5.1 (RTX 4050 laptop); also runs on Isaac Sim 6.2 (pip) on aarch64 (DGX Spark / GB10).
+
 Useful flags:
 
 | flag | meaning |
@@ -28,6 +38,8 @@ Useful flags:
 | `--track N` | cinematic follow-cam on person N (side tracking shot) |
 | `--record DIR` | write a numbered PNG frame sequence of that shot |
 | `--every N` | one recorded frame every N physics steps (2 = 30 fps) |
+| `--view ex,ey,ez,tx,ty,tz` | fixed camera eye + target instead of the overview (e.g. `8.6,0.6,1.7,8.6,4.2,0.6` = side view of the F1 hand-off) |
+| `--focal MM` | focal length of that fixed camera (default 9) |
 
 ## People
 
